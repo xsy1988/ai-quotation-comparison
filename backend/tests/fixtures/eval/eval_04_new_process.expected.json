@@ -1,0 +1,13 @@
+{
+  "supplier_name": "深圳市耀达五金有限公司",
+  "final_unit_price_taxed": 16.22,
+  "calc_check": "pass",
+  "category": "CAT-WJWK",
+  "expected_atoms": {
+    "CNC加工": "AT-QX-001",
+    "阳极氧化": "AT-ZH-013",
+    "真空离子镀膜": "AT-ZK-012"
+  },
+  "unmatched_new_process": [],
+  "description": "语义近义工艺：喷砂→真空离子镀膜，应 L2 语义命中 AT-ZK-012（离子镀），不判新工艺"
+}

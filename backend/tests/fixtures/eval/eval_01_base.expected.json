@@ -1,0 +1,13 @@
+{
+  "supplier_name": "东莞华锐五金制品有限公司",
+  "final_unit_price_taxed": 10.51,
+  "calc_check": "pass",
+  "category": "CAT-WJWK",
+  "expected_atoms": {
+    "CNC加工": "AT-QX-001",
+    "阳极氧化": "AT-ZH-013",
+    "喷砂": "AT-ZP-005"
+  },
+  "unmatched_new_process": [],
+  "description": "基准：不同供应商/日期，金额与蓝本一致"
+}

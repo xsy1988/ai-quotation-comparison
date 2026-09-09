@@ -1,0 +1,243 @@
+{
+  "schema_version": "1.1",
+  "supplier": {
+    "supplier_name": "深圳市样例五金有限公司",
+    "supplier_code": null
+  },
+  "basic": {
+    "project_name": "样例项目-L1未匹配",
+    "part_name": "铝合金外壳",
+    "material_spec": "AL6063-T5",
+    "quote_date": "2026-09-01",
+    "currency": "CNY",
+    "moq": 1000,
+    "category": "CAT-WJWK",
+    "quote_no": "Q-2026-0901-001",
+    "source_file": "sample_quote.xlsx",
+    "parse_status": "parsed"
+  },
+  "unit_price": {
+    "materials": {
+      "total": 4.5,
+      "items": [
+        {
+          "name": "铝材",
+          "amount_per_pc": 4.5,
+          "spec": "AL6063-T5",
+          "note": "2.5kg × 18元/kg − 水口回收",
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B7:C7",
+            "raw_text": "铝材 4.50"
+          }
+        }
+      ]
+    },
+    "processing": {
+      "total": 4.2,
+      "items": [
+        {
+          "name": "CNC加工",
+          "amount_per_pc": 2.0,
+          "confirm_status": "unconfirmed",
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B9:C9",
+            "raw_text": "CNC加工 2.00"
+          },
+          "confidence": "low"
+        },
+        {
+          "name": "阳极氧化",
+          "amount_per_pc": 1.2,
+          "confirm_status": "unconfirmed",
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B10:C10",
+            "raw_text": "阳极氧化 1.20"
+          },
+          "confidence": "low"
+        },
+        {
+          "name": "喷砂",
+          "amount_per_pc": 0.5,
+          "confirm_status": "unconfirmed",
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B11:C11",
+            "raw_text": "喷砂 0.50"
+          },
+          "confidence": "low"
+        },
+        {
+          "name": "EDM",
+          "amount_per_pc": 0.3,
+          "confirm_status": "unconfirmed",
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B12:C12",
+            "raw_text": "EDM 0.30"
+          },
+          "confidence": "low"
+        },
+        {
+          "name": "激光熔覆",
+          "amount_per_pc": 0.2,
+          "confirm_status": "unconfirmed",
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B13:C13",
+            "raw_text": "激光熔覆 0.20"
+          },
+          "confidence": "low"
+        }
+      ]
+    },
+    "inspection": {
+      "total": 0.3,
+      "items": [
+        {
+          "name": "全尺寸检验",
+          "amount_per_pc": 0.3,
+          "note": null,
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B13:C13",
+            "raw_text": "全尺寸检验 0.30"
+          }
+        }
+      ]
+    },
+    "packaging_transport": {
+      "total": 0.15,
+      "items": [
+        {
+          "name": "包装",
+          "amount_per_pc": 0.1,
+          "item_type": "包装",
+          "note": null,
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B15:C15",
+            "raw_text": "包装 0.10"
+          }
+        },
+        {
+          "name": "顺丰运费",
+          "amount_per_pc": 0.05,
+          "item_type": "包装",
+          "note": null,
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B16:C16",
+            "raw_text": "顺丰运费 0.05"
+          }
+        }
+      ]
+    },
+    "sga_tax": {
+      "total": 1.86,
+      "items": [
+        {
+          "name": "损耗",
+          "amount_per_pc": 0.15,
+          "item_type": "损耗",
+          "rate": null,
+          "note": null,
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B18:C18",
+            "raw_text": "损耗 0.15"
+          }
+        },
+        {
+          "name": "管理费",
+          "amount_per_pc": 0.3,
+          "item_type": "管理费",
+          "rate": null,
+          "note": null,
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B19:C19",
+            "raw_text": "管理费 0.30"
+          }
+        },
+        {
+          "name": "利润",
+          "amount_per_pc": 0.9,
+          "item_type": "利润",
+          "rate": null,
+          "note": null,
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B20:C20",
+            "raw_text": "利润 0.90"
+          }
+        },
+        {
+          "name": "增值税",
+          "amount_per_pc": 0.51,
+          "item_type": "税费",
+          "rate": 0.13,
+          "note": "税率13%",
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B21:C21",
+            "raw_text": "增值税 0.51"
+          }
+        }
+      ]
+    },
+    "other": {
+      "total": null,
+      "items": []
+    },
+    "summary": {
+      "untaxed_total": 10.5,
+      "tax_amount": 0.51,
+      "taxed_total": 11.01,
+      "discount": 0,
+      "final_unit_price_taxed": 11.01,
+      "calc_check": "unchecked"
+    }
+  },
+  "tooling": {
+    "total": 28000,
+    "molds": {
+      "total": 25000,
+      "items": [
+        {
+          "name": "冲压成型模",
+          "amount": 25000,
+          "cavities": 1,
+          "lifespan": 500000,
+          "note": "寿命50万模次",
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B28:C28",
+            "raw_text": "冲压成型模 25000"
+          }
+        }
+      ]
+    },
+    "fixtures": {
+      "total": 3000,
+      "items": [
+        {
+          "name": "检具",
+          "amount": 3000,
+          "note": null,
+          "evidence": {
+            "file": "sample_quote.xlsx",
+            "location": "报价单!B29:C29",
+            "raw_text": "检具 3000"
+          }
+        }
+      ]
+    },
+    "stencils": {
+      "total": null,
+      "items": []
+    }
+  }
+}

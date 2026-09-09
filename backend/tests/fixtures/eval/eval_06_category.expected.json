@@ -1,0 +1,13 @@
+{
+  "supplier_name": "东莞市众塑精密塑胶有限公司",
+  "final_unit_price_taxed": 10.51,
+  "calc_check": "pass",
+  "category": "CAT-SJ",
+  "expected_atoms": {
+    "CNC 加工": "AT-QX-001",
+    "注塑成型": "AT-CX-035",
+    "喷砂": "AT-ZP-005"
+  },
+  "unmatched_new_process": [],
+  "description": "品类切换：塑胶中框（CAT-SJ），阳极氧化→注塑成型"
+}

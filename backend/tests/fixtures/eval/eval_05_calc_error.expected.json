@@ -1,0 +1,13 @@
+{
+  "supplier_name": "佛山市顺德区铭川五金厂",
+  "final_unit_price_taxed": 11.51,
+  "calc_check": "fail",
+  "category": "CAT-WJWK",
+  "expected_atoms": {
+    "CNC加工": "AT-QX-001",
+    "阳极氧化": "AT-ZH-013",
+    "喷砂": "AT-ZP-005"
+  },
+  "unmatched_new_process": [],
+  "description": "勾稽有意出错：含税合计/最终单价虚高 1.00，期望 calc_check=fail"
+}

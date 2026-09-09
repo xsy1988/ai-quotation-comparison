@@ -1,0 +1,15 @@
+{
+  "supplier_name": "深圳市凯盛五金制品有限公司",
+  "final_unit_price_taxed": 11.57,
+  "calc_check": "pass",
+  "category": "CAT-WJWK",
+  "expected_atoms": {
+    "CNC 加工": "AT-QX-001",
+    "激光咬花": "AT-QT-001",
+    "干喷砂": "AT-ZP-005"
+  },
+  "unmatched_new_process": [
+    "激光咬花"
+  ],
+  "description": "别名+兜底混合：激光咬花应 L2 兜底，CNC 加工/干喷砂 L1 别名命中"
+}

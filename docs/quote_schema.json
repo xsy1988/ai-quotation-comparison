@@ -1,0 +1,283 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "供应商报价单标准结构",
+  "description": "报价单解析的统一 Schema v1.1（2026-09-08）。LLM 解析输出、校验、对比均以本 JSON 为处理基准；落库时由此派生关系表记录。\n金额单位约定：unit_price 下所有明细与合计均为 元/pcs；tooling 下为 元/项（一次性费用）。\n全层级金额原则：每个费用模块都有 total 字段（模块合计），因为供应商可能只报模块总价而没有明细。total 与 items 可独立存在：有 total 无 items = 供应商打包报了模块价；有 items 无 total = 由明细汇总得出；两者都有时，模块合计应 ≥ 明细之和（合计中可能包含未逐项列出的内容），合计 < 明细之和判定为勾稽异常。对比取值优先级：total > Σitems。对比时逐层级看合计，按需展开明细（前端 +/− 折叠展开）。",
+  "type": "object",
+  "required": ["schema_version", "supplier", "basic", "unit_price"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.1" },
+
+    "supplier": {
+      "type": "object",
+      "required": ["supplier_name"],
+      "properties": {
+        "supplier_name": { "type": "string", "description": "供应商名称（原文）" },
+        "supplier_code": { "type": ["string", "null"], "description": "供应商编码，关联 supplier 主数据表；新供应商为 null" }
+      }
+    },
+
+    "basic": {
+      "type": "object",
+      "required": ["part_name", "currency"],
+      "properties": {
+        "project_name":  { "type": ["string", "null"] },
+        "part_name":     { "type": "string", "description": "零件名称" },
+        "material_spec": { "type": ["string", "null"], "description": "材料规格（原文）" },
+        "quote_date":    { "type": ["string", "null"], "format": "date" },
+        "currency":      { "type": "string", "enum": ["CNY", "USD", "EUR", "JPY", "HKD", "TWD", "KRW", "OTHER"] },
+        "moq":           { "type": ["number", "null"], "description": "最小起订量（pcs）" },
+        "category":      { "type": ["string", "null"], "description": "品类编码，关联 category 主数据；决定加工费原子映射的候选范围" },
+        "quote_no":      { "type": ["string", "null"] },
+        "source_file":   { "type": ["string", "null"], "description": "来源文件归档路径" },
+        "parse_status":  { "type": "string", "enum": ["parsed", "in_comparison", "reviewed"], "default": "parsed", "description": "parsed=解析完成（直接进入比价）；in_comparison=已在比价界面被查看；reviewed=人工抽查/修正过" }
+      }
+    },
+
+    "unit_price": {
+      "type": "object",
+      "description": "产品单价分解，所有金额单位 = 元/pcs",
+      "required": ["materials", "processing", "inspection", "packaging_transport", "sga_tax", "other", "summary"],
+      "properties": {
+
+        "materials": {
+          "type": "object",
+          "description": "材料费",
+          "required": ["total", "items"],
+          "properties": {
+            "total": { "type": ["number", "null"], "description": "材料费合计（元/pcs）。供应商只报总价时直接填此字段，items 为空" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "amount_per_pc"],
+                "properties": {
+                  "name":          { "type": "string" },
+                  "amount_per_pc": { "type": "number", "description": "元/pcs" },
+                  "spec":          { "type": ["string", "null"], "description": "材质/规格（原文）" },
+                  "note":          { "type": ["string", "null"], "description": "说明，自由文本（重量×单价−水口回收等计算过程原样保留）" },
+                  "evidence":      { "$ref": "#/definitions/evidence" }
+                }
+              }
+            }
+          }
+        },
+
+        "processing": {
+          "type": "object",
+          "description": "生产加工费（统一结构，全品类通用）",
+          "required": ["total", "items"],
+          "properties": {
+            "total": { "type": ["number", "null"], "description": "加工费合计（元/pcs）。供应商只报加工总价时直接填此字段" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "amount_per_pc", "confidence", "confirm_status"],
+                "properties": {
+                  "name":               { "type": "string", "description": "供应商原文名称" },
+                  "amount_per_pc":      { "type": "number", "description": "元/pcs" },
+                  "atom_code":          { "type": ["string", "null"], "description": "命中的原子编码；工艺不在清单中时用兜底编码 AT-QT-001（其它工艺）；完全无法判断为 null" },
+                  "is_new_process":     { "type": "boolean", "default": false, "description": "LLM 判定为清单外的新工艺时置 true，触发新工艺上报流程（前端询问是否新增原子）" },
+                  "bundle_flag":        { "type": "boolean", "default": false },
+                  "bundle_members":     { "type": "array", "items": { "type": "string" }, "description": "打包项的原子编码列表；单项时为 [atom_code]" },
+                  "bundle_fingerprint": { "type": ["string", "null"], "description": "组合指纹：bundle_members 排序后拼接，跨供应商对齐用" },
+                  "split_method":       { "type": "string", "enum": ["none", "supplier", "estimated"], "default": "none" },
+                  "confidence":         { "type": "string", "enum": ["high", "mid", "low"] },
+                  "match_path":         { "type": ["string", "null"], "enum": ["alias_exact", "llm_semantic", "manual", null] },
+                  "confirm_status":     { "type": "string", "enum": ["unconfirmed", "confirmed", "corrected"], "default": "unconfirmed", "description": "不再作为比价前置门槛；用户在比价界面中顺手确认/修正" },
+                  "note":               { "type": ["string", "null"] },
+                  "evidence":           { "$ref": "#/definitions/evidence" }
+                }
+              }
+            }
+          }
+        },
+
+        "inspection": {
+          "type": "object",
+          "description": "检验费",
+          "required": ["total", "items"],
+          "properties": {
+            "total": { "type": ["number", "null"], "description": "检验费合计（元/pcs）" },
+            "items": { "type": "array", "items": { "$ref": "#/definitions/simple_fee_item" } }
+          }
+        },
+
+        "packaging_transport": {
+          "type": "object",
+          "description": "包装运输费",
+          "required": ["total", "items"],
+          "properties": {
+            "total": { "type": ["number", "null"], "description": "包装运输费合计（元/pcs）。供应商合并报价时只填此字段，items 为空" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "amount_per_pc", "item_type"],
+                "properties": {
+                  "name":          { "type": "string" },
+                  "amount_per_pc": { "type": "number" },
+                  "item_type":     { "type": "string", "enum": ["包装", "运输"] },
+                  "note":          { "type": ["string", "null"] },
+                  "evidence":      { "$ref": "#/definitions/evidence" }
+                }
+              }
+            }
+          }
+        },
+
+        "sga_tax": {
+          "type": "object",
+          "description": "损管利税（损耗/管理费/利润/税费统一条目列表）",
+          "required": ["total", "items"],
+          "properties": {
+            "total": { "type": ["number", "null"], "description": "损管利税合计（元/pcs）" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "amount_per_pc", "item_type"],
+                "properties": {
+                  "name":          { "type": "string" },
+                  "amount_per_pc": { "type": "number", "description": "元/pcs" },
+                  "item_type":     { "type": "string", "enum": ["损耗", "管理费", "利润", "税费", "其他"] },
+                  "rate":          { "type": ["number", "null"], "description": "费率原文（0.13 = 13%）；税费条目必填" },
+                  "note":          { "type": ["string", "null"] },
+                  "evidence":      { "$ref": "#/definitions/evidence" }
+                }
+              }
+            }
+          }
+        },
+
+        "other": {
+          "type": "object",
+          "description": "其他费用兜底",
+          "required": ["total", "items"],
+          "properties": {
+            "total": { "type": ["number", "null"] },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "amount_per_pc", "note"],
+                "properties": {
+                  "name":          { "type": "string" },
+                  "amount_per_pc": { "type": "number" },
+                  "note":          { "type": "string", "description": "说明（必填）：该费用是什么、为何无法归类" },
+                  "evidence":      { "$ref": "#/definitions/evidence" }
+                }
+              }
+            }
+          }
+        },
+
+        "summary": {
+          "type": "object",
+          "description": "汇总与勾稽。勾稽规则：untaxed_total = Σ 各模块合计（排除税费）；taxed_total = untaxed_total + tax_amount；final_unit_price_taxed = taxed_total − discount。模块合计取值优先级：模块 total 字段 > Σ 模块 items。",
+          "required": ["final_unit_price_taxed"],
+          "properties": {
+            "untaxed_total":          { "type": ["number", "null"], "description": "未税合计（元/pcs）" },
+            "tax_amount":             { "type": ["number", "null"], "description": "税额（元/pcs）" },
+            "taxed_total":            { "type": ["number", "null"], "description": "含税合计（元/pcs）" },
+            "discount":               { "type": ["number", "null"], "description": "折扣调整额（元/pcs），正数为减让" },
+            "final_unit_price_taxed": { "type": "number", "description": "最终含税单价（元/pcs），对比的第一基准" },
+            "calc_check":             { "type": "string", "enum": ["pass", "fail", "unchecked"], "default": "unchecked", "description": "勾稽校验结果；fail 在比价界面高亮提示，不阻断流程" }
+          }
+        }
+      }
+    },
+
+    "tooling": {
+      "type": ["object", "null"],
+      "description": "模/治具费用，一次性费用，金额单位 = 元/项（非 pcs）。全层级金额：tooling.total 为模治具总合计，各子类也有自己的 total。",
+      "properties": {
+        "total": { "type": ["number", "null"], "description": "模/治具费用总合计（元）" },
+        "molds": {
+          "type": "object",
+          "required": ["total", "items"],
+          "properties": {
+            "total": { "type": ["number", "null"], "description": "模具费合计（元）" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "amount"],
+                "properties": {
+                  "name":     { "type": "string" },
+                  "amount":   { "type": "number", "description": "元，一次性" },
+                  "cavities": { "type": ["integer", "null"], "description": "穴数" },
+                  "lifespan": { "type": ["number", "null"], "description": "寿命（模次）" },
+                  "note":     { "type": ["string", "null"] },
+                  "evidence": { "$ref": "#/definitions/evidence" }
+                }
+              }
+            }
+          }
+        },
+        "fixtures": {
+          "type": "object",
+          "required": ["total", "items"],
+          "properties": {
+            "total": { "type": ["number", "null"] },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "amount"],
+                "properties": {
+                  "name":   { "type": "string" },
+                  "amount": { "type": "number" },
+                  "note":   { "type": ["string", "null"] },
+                  "evidence": { "$ref": "#/definitions/evidence" }
+                }
+              }
+            }
+          }
+        },
+        "stencils": {
+          "type": "object",
+          "required": ["total", "items"],
+          "properties": {
+            "total": { "type": ["number", "null"], "description": "钢网费合计（元）" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "amount"],
+                "properties": {
+                  "name":   { "type": "string" },
+                  "amount": { "type": "number" },
+                  "note":   { "type": ["string", "null"] },
+                  "evidence": { "$ref": "#/definitions/evidence" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  "definitions": {
+    "evidence": {
+      "type": ["object", "null"],
+      "description": "原文出处，全链路可回溯",
+      "properties": {
+        "file":     { "type": ["string", "null"] },
+        "location": { "type": ["string", "null"], "description": "sheet+单元格 / 页码+区域" },
+        "raw_text": { "type": ["string", "null"], "description": "原文片段" }
+      }
+    },
+    "simple_fee_item": {
+      "type": "object",
+      "required": ["name", "amount_per_pc"],
+      "properties": {
+        "name":          { "type": "string" },
+        "amount_per_pc": { "type": "number" },
+        "note":          { "type": ["string", "null"] },
+        "evidence":      { "$ref": "#/definitions/evidence" }
+      }
+    }
+  }
+}

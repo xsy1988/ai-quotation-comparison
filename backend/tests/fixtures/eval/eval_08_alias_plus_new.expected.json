@@ -1,0 +1,13 @@
+{
+  "supplier_name": "惠州志远五金加工厂",
+  "final_unit_price_taxed": 10.51,
+  "calc_check": "pass",
+  "category": "CAT-WJWK",
+  "expected_atoms": {
+    "CNC 加工": "AT-QX-001",
+    "阳极处理": "AT-ZH-013",
+    "真空离子镀膜": "AT-ZK-012"
+  },
+  "unmatched_new_process": [],
+  "description": "别名（阳极处理/CNC 加工）+ 真空离子镀膜 L2 语义命中 AT-ZK-012"
+}
