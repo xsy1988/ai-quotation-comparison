@@ -1,16 +1,19 @@
-"""全格式 IR 构造：docx / pdf（文字层）/ 图片（vision OCR）→ 与 excel_to_ir 同构的 IR。
+"""全格式 IR 构造：docx / pdf（文字层 + 扫描版渲染 OCR）/ 图片（vision OCR）→ 与 excel_to_ir 同构的 IR。
 
 OCR 走 LLM 网关 vision 模型（qwen3.5-ocr），失败上抛不降级（用户政策：不降级，中止并反馈）。
+扫描版 PDF 由 pypdfium2 按页渲染为 PNG（200 DPI）后逐页 OCR，sheet 记为 page_N。
 OCR 输出要求与版面理解的 IR 行格式一致（sheet|行号|列号:值|...），sheet 固定 "ocr"，
 因此 layout_understand 的 _serialize_ir / prompt 无需任何改动。
 """
 
 import base64
+import io
 import json
 import re
 from pathlib import Path
 
 import pdfplumber
+import pypdfium2 as pdfium
 from docx import Document
 
 from .ir import CellValue, IR, TableRow, TextBlock
@@ -63,47 +66,72 @@ def docx_to_ir(path: Path, file_hash: str) -> IR:
     return ir
 
 
-def pdf_to_ir(path: Path, file_hash: str) -> IR:
+def pdf_to_ir(path: Path, file_hash: str, chat_fn=None) -> IR:
     """pdfplumber 逐页：extract_tables → TableRow(sheet=page_N)；页面纯文本 → TextBlock(sheet=page_N)。
 
-    全部页都抽不到任何文字/表格 → 视为无文字层扫描件，抛 ParseError（不直接 OCR，请用户转图片）。
+    某页文字层与表格都抽不到内容（扫描页）→ pypdfium2 渲染该页为 PNG（200 DPI）→ vision OCR，
+    结果归入同一 page_N sheet。LLM 错误上抛不降级；渲染失败抛 ParseError。
     """
     from .ingest import ParseError
 
     ir = IR(source_file=path.name, file_hash=file_hash, file_type="pdf", sheets=[], tables=[])
-    seen_any_text = False
-    with pdfplumber.open(path) as pdf:
-        for page_no, page in enumerate(pdf.pages, start=1):
-            sheet = f"page_{page_no}"
-            page_has_content = False
+    pdf = pdfium.PdfDocument(str(path))
+    try:
+        page_count = len(pdf)
+        with pdfplumber.open(path) as pl:
+            for page_no in range(1, page_count + 1):
+                sheet = f"page_{page_no}"
+                page = pl.pages[page_no - 1]
+                page_has_content = False
 
-            for table in page.extract_tables() or []:
-                rows_added = 0
-                for r_idx, row in enumerate(table, start=1):
-                    cells = [
-                        CellValue(row=r_idx, col=c_idx, value=str(v).strip())
-                        for c_idx, v in enumerate(row, start=1)
-                        if v is not None and str(v).strip()
-                    ]
-                    table_row = TableRow(sheet=sheet, row_number=r_idx, cells=cells)
-                    if not table_row.is_empty():
-                        ir.tables.append(table_row)
-                        rows_added += 1
-                if rows_added:
+                for table in page.extract_tables() or []:
+                    rows_added = 0
+                    for r_idx, row in enumerate(table, start=1):
+                        cells = [
+                            CellValue(row=r_idx, col=c_idx, value=str(v).strip())
+                            for c_idx, v in enumerate(row, start=1)
+                            if v is not None and str(v).strip()
+                        ]
+                        table_row = TableRow(sheet=sheet, row_number=r_idx, cells=cells)
+                        if not table_row.is_empty():
+                            ir.tables.append(table_row)
+                            rows_added += 1
+                    if rows_added:
+                        page_has_content = True
+
+                text = (page.extract_text() or "").strip()
+                if text:
+                    ir.blocks.append(TextBlock(text=text, sheet=sheet, row=1, col=1))
                     page_has_content = True
 
-            text = (page.extract_text() or "").strip()
-            if text:
-                ir.blocks.append(TextBlock(text=text, sheet=sheet, row=1, col=1))
-                page_has_content = True
+                if not page_has_content:
+                    b64 = _render_pdf_page_b64(pdf, page_no - 1, ParseError)
+                    tables, blocks = _ocr_image_b64(b64, "png", sheet, chat_fn)
+                    ir.tables.extend(tables)
+                    ir.blocks.extend(blocks)
+                    page_has_content = bool(tables or blocks)
 
-            if page_has_content:
-                seen_any_text = True
-                ir.sheets.append(sheet)
-
-    if not seen_any_text:
-        raise ParseError("PDF 无文字层，暂不支持扫描版 PDF，请转为图片上传")
+                if page_has_content:
+                    ir.sheets.append(sheet)
+    finally:
+        pdf.close()
     return ir
+
+
+def _render_pdf_page_b64(pdf: "pdfium.PdfDocument", index: int, error_cls) -> str:
+    """pypdfium2 渲染单页为 200 DPI PNG → base64。渲染失败抛中文 ParseError。"""
+    page = pdf[index]
+    try:
+        try:
+            bitmap = page.render(scale=200 / 72)
+            pil_image = bitmap.to_pil()
+        except Exception as exc:
+            raise error_cls(f"扫描版 PDF 第 {index + 1} 页渲染失败：{exc}") from exc
+    finally:
+        page.close()
+    buf = io.BytesIO()
+    pil_image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _decode_ocr_lines(parsed: dict) -> str:
@@ -152,17 +180,16 @@ def _parse_ir_lines(lines_text: str) -> tuple[list[TableRow], list]:
     return tables, blocks
 
 
-def image_to_ir(path: Path, file_hash: str, chat_fn=None) -> IR:
-    """图片 → base64 → vision OCR（chat_json, model=qwen3.5-ocr, 多模态 content）→ IR。
+def _ocr_image_b64(
+    b64: str, mime: str, sheet: str, chat_fn=None
+) -> tuple[list[TableRow], list[TextBlock]]:
+    """base64 图片 → vision OCR（chat_json, model=qwen3.5-ocr）→ IR 行，sheet 归一到调用方指定值。
 
     LLMError/LLMUnavailable 上抛不捕获（不降级）。OCR 行格式与版面理解 IR 序列化一致。
     """
     from .llm import client as llm_client
 
     fn = chat_fn or llm_client.chat_json
-    suffix = path.suffix.lstrip(".").lower()
-    mime = "jpeg" if suffix in ("jpg", "jpeg") else suffix
-    b64 = base64.b64encode(path.read_bytes()).decode("ascii")
     messages = [
         {
             "role": "user",
@@ -174,6 +201,20 @@ def image_to_ir(path: Path, file_hash: str, chat_fn=None) -> IR:
     ]
     parsed, _usage = fn(messages, model=OCR_MODEL)
     tables, blocks = _parse_ir_lines(_decode_ocr_lines(parsed))
+    # 提示词固定输出 sheet "ocr"，这里替换为调用方指定的 sheet（page_N / ocr）
+    for t in tables:
+        t.sheet = sheet
+    for b in blocks:
+        b.sheet = sheet
+    return tables, blocks
+
+
+def image_to_ir(path: Path, file_hash: str, chat_fn=None) -> IR:
+    """图片 → base64 → vision OCR（sheet="ocr"）→ IR。"""
+    suffix = path.suffix.lstrip(".").lower()
+    mime = "jpeg" if suffix in ("jpg", "jpeg") else suffix
+    b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+    tables, blocks = _ocr_image_b64(b64, mime, "ocr", chat_fn)
     return IR(
         source_file=path.name,
         file_hash=file_hash,

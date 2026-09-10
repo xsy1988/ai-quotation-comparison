@@ -1,6 +1,9 @@
 body {
   margin: 0;
-  background: #f5f5f5;
+  background: #f0f2f5;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* 金额右对齐，数字等宽 */
@@ -10,9 +13,69 @@ body {
   white-space: nowrap;
 }
 
-/* 空值语义：供应商未报此行 */
+/* 空值语义：供应商未报此行（"/"） */
 .na-cell {
-  color: #bfbfbf;
-  font-size: 12px;
+  color: #c2c2c2;
+  font-size: 13px;
   white-space: nowrap;
+}
+
+/* 加工费明细单元格：更换工艺的 icon 仅 hover 时可见 */
+.proc-cell .proc-cell-atom {
+  visibility: hidden;
+}
+.proc-cell:hover .proc-cell-atom {
+  visibility: visible;
+}
+
+/* 层级底色：每个层级一个浅色色系，父级比子级更显眼；
+   同一层级内相邻行用同色系深浅交替（斑马纹），避免相邻行糊在一起 */
+/* L0 顶层模块：暖黄，最显眼 */
+.hier-l0 > td {
+  background: #fdf0cd !important;
+}
+.hier-l0.hier-alt > td {
+  background: #fdf6e0 !important;
+}
+.hier-l0:hover > td {
+  background: #f9e1a8 !important;
+}
+/* L1：浅绿 */
+.hier-l1 > td {
+  background: #e9f6ea !important;
+}
+.hier-l1.hier-alt > td {
+  background: #f1faf2 !important;
+}
+.hier-l1:hover > td {
+  background: #d7edda !important;
+}
+/* L2：浅蓝 */
+.hier-l2 > td {
+  background: #ecf4fd !important;
+}
+.hier-l2.hier-alt > td {
+  background: #f2f8fe !important;
+}
+.hier-l2:hover > td {
+  background: #d9e9fb !important;
+}
+/* L3 及以下：浅杏色（与 L2 浅蓝成明显色系区分，保持浅色、弱于父级） */
+.hier-l3 > td {
+  background: #fdf0e3 !important;
+}
+.hier-l3.hier-alt > td {
+  background: #fef7ef !important;
+}
+.hier-l3:hover > td {
+  background: #f9e0c8 !important;
+}
+
+/* 产品单价下的 含税/未税总价与折扣行：中性浅灰底 + 灰字，脱离层级色系，降低视觉引导 */
+.summary-row > td {
+  background: #f7f8fa !important;
+  color: #8c8c8c;
+}
+.summary-row:hover > td {
+  background: #eceff3 !important;
 }

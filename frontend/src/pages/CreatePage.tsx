@@ -49,7 +49,7 @@ export default function CreatePage() {
       .map((f) => f.originFileObj)
       .filter((f): f is NonNullable<typeof f> => f instanceof File)
     if (rawFiles.length === 0) {
-      message.warning('请至少上传一个 .xlsx 报价文件')
+      message.warning('请至少上传一个报价文件（.xlsx / .pdf）')
       return
     }
     mutation.mutate({ files: rawFiles, projectName: values.project_name })
@@ -73,14 +73,15 @@ export default function CreatePage() {
         >
           <Input placeholder="例如：新能源汽车电控壳体" />
         </Form.Item>
-        <Form.Item label="报价文件（.xlsx，可多选多家供应商）" required>
+        <Form.Item label="报价文件（.xlsx / .pdf，可多选多家供应商）" required>
           <Upload.Dragger
             multiple
-            accept=".xlsx"
+            accept=".xlsx,.pdf"
             fileList={fileList}
             beforeUpload={(file) => {
-              if (!file.name.toLowerCase().endsWith('.xlsx')) {
-                message.error(`仅支持 .xlsx 文件：${file.name}`)
+              const lower = file.name.toLowerCase()
+              if (!lower.endsWith('.xlsx') && !lower.endsWith('.pdf')) {
+                message.error(`仅支持 .xlsx / .pdf 文件：${file.name}`)
                 return Upload.LIST_IGNORE
               }
               return false // 阻止自动上传，提交时手动上传
@@ -91,7 +92,7 @@ export default function CreatePage() {
               <InboxOutlined />
             </p>
             <p className="ant-upload-text">点击或拖拽报价文件到此区域</p>
-            <p className="ant-upload-hint">每个文件视为一家供应商的报价单</p>
+            <p className="ant-upload-hint">每个文件视为一家供应商的报价单，扫描版 PDF 也可解析</p>
           </Upload.Dragger>
         </Form.Item>
         <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>

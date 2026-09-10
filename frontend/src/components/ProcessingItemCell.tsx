@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { App, InputNumber, Select, Spin, Tag } from 'antd'
+import { App, InputNumber, Select, Spin, Tag, Tooltip } from 'antd'
+import { SwapOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ProcessingItem } from '../types'
 import { errorDetail, getAtoms, patchQuoteLine } from '../api/client'
@@ -44,7 +45,7 @@ export default function ProcessingItemCell({ item }: Props) {
   }
 
   return (
-    <span style={{ display: 'block' }}>
+    <span className="proc-cell" style={{ display: 'block' }}>
       {editingAmount ? (
         <InputNumber
           size="small"
@@ -73,7 +74,8 @@ export default function ProcessingItemCell({ item }: Props) {
         </Tag>
       )}
       {item.is_new_process && <Tag color="purple">新工艺</Tag>}
-      <span style={{ marginLeft: 6 }}>
+      {/* 原子映射默认隐藏，hover 单元格出现 icon，点击搜索更换工艺（match_path 将变为 manual） */}
+      <span className="proc-cell-atom" style={{ marginLeft: 6 }}>
         {editingAtom ? (
           <Select
             size="small"
@@ -98,20 +100,15 @@ export default function ProcessingItemCell({ item }: Props) {
             style={{ minWidth: 220 }}
           />
         ) : (
-          <span
-            onClick={() => {
-              setAtomSearch(item.atom_code ?? item.name)
-              setEditingAtom(true)
-            }}
-            style={{ cursor: 'pointer', fontSize: 12 }}
-            title="点击修改原子映射（match_path 将变为 manual）"
-          >
-            {item.atom_code ? (
-              <Tag color="green">{item.atom_code}</Tag>
-            ) : (
-              <Tag color="red">未匹配</Tag>
-            )}
-          </span>
+          <Tooltip title={item.atom_code ? '搜索更换工艺' : '未匹配，点击搜索匹配工艺'}>
+            <SwapOutlined
+              style={{ cursor: 'pointer', color: item.atom_code ? undefined : '#faad14' }}
+              onClick={() => {
+                setAtomSearch(item.atom_code ?? item.name)
+                setEditingAtom(true)
+              }}
+            />
+          </Tooltip>
         )}
       </span>
     </span>

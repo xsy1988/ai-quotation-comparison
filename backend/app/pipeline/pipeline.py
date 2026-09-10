@@ -29,7 +29,11 @@ FINAL_TASK_STATUS = "parsed"
 def create_task(
     conn: sqlite3.Connection, project_name: str, files: list[tuple[str, bytes]]
 ) -> int:
-    """上传文件落盘 data/uploads/<task_id>/，建 task 行（status='parsing'），返回 task_id。"""
+    """上传文件落盘 data/uploads/<task_id>/，建 task 行（status='parsing'），返回 task_id。
+
+    每个文件同步预建 quote 占位行（parse_status='pending'，supplier_name 记原文件名），
+    进度接口从任务创建起即可逐文件展示；quote_id 记入 upload 日志供流水线回填。
+    """
     init_db()
     with conn:
         cur = conn.execute(
@@ -45,9 +49,16 @@ def create_task(
         path = upload_dir / safe_name
         path.write_bytes(content)
         with conn:
+            cur = conn.execute(
+                "INSERT INTO quote (task_id, supplier_name, parse_status) VALUES (?, ?, 'pending')",
+                (task_id, safe_name),
+            )
             conn.execute(
                 "INSERT INTO parse_log (task_id, stage, action, detail) VALUES (?, 'task', 'upload', ?)",
-                (task_id, json.dumps({"original_name": safe_name, "path": str(path)}, ensure_ascii=False)),
+                (task_id, json.dumps(
+                    {"original_name": safe_name, "path": str(path), "quote_id": cur.lastrowid},
+                    ensure_ascii=False,
+                )),
             )
     return task_id
 
@@ -68,16 +79,28 @@ def _log(
 
 
 def _mark_failed(
-    conn: sqlite3.Connection, task_id: int, original_name: str, stage: str, error: Exception
+    conn: sqlite3.Connection,
+    task_id: int,
+    original_name: str,
+    stage: str,
+    error: Exception,
+    quote_id: int | None = None,
 ) -> int:
-    """失败 quote 占位行：supplier_name 记原文件名，basic_info 记错误，parse_status='failed'。"""
+    """失败 quote：有占位行则回填（parse_status='failed'、basic_info 记错误），无则新建失败行。"""
     with conn:
-        cur = conn.execute(
-            """INSERT INTO quote (task_id, supplier_name, basic_info, parse_status)
-               VALUES (?, ?, ?, 'failed')""",
-            (task_id, original_name, json.dumps({"error": str(error)}, ensure_ascii=False)),
-        )
-        quote_id = cur.lastrowid
+        if quote_id is not None:
+            conn.execute(
+                """UPDATE quote SET parse_status='failed', basic_info=?,
+                          updated_at=datetime('now', 'localtime') WHERE id=?""",
+                (json.dumps({"error": str(error)}, ensure_ascii=False), quote_id),
+            )
+        else:
+            cur = conn.execute(
+                """INSERT INTO quote (task_id, supplier_name, basic_info, parse_status)
+                   VALUES (?, ?, ?, 'failed')""",
+                (task_id, original_name, json.dumps({"error": str(error)}, ensure_ascii=False)),
+            )
+            quote_id = cur.lastrowid
         conn.execute(
             "INSERT INTO parse_log (quote_id, task_id, stage, action, detail) VALUES (?, ?, ?, 'failed', ?)",
             (quote_id, task_id, stage, json.dumps({"error": str(error), "type": type(error).__name__}, ensure_ascii=False)),
@@ -85,21 +108,25 @@ def _mark_failed(
     return quote_id
 
 
-def _process_file(conn: sqlite3.Connection, task_id: int, project_name: str, path: Path) -> dict:
+def _process_file(
+    conn: sqlite3.Connection, task_id: int, project_name: str, path: Path, quote_id: int | None = None
+) -> dict:
     # ⓪ 查重 + ① 接入（ingest 自建连接提交）
     ingest_result = ingest_file(path)
     file_hash = ingest_result["sha256"]
-    _log(conn, task_id, "dedup", ingest_result["status"], ingest_result)
+    _log(conn, task_id, "dedup", ingest_result["status"], ingest_result, quote_id)
 
     # 同 hash 已有 quote：复用历史解析结果（快照重新派生落库，不重复解析/映射）
     existing_quote_id = find_quote_by_hash(conn, file_hash)
     if existing_quote_id is not None:
         row = conn.execute("SELECT raw_json_path FROM quote WHERE id = ?", (existing_quote_id,)).fetchone()
         data = json.loads(Path(row["raw_json_path"]).read_text(encoding="utf-8"))
-        result = persist_quote(data, project_name=project_name, task_id=task_id, file_hash=file_hash)
+        result = persist_quote(
+            data, project_name=project_name, task_id=task_id, file_hash=file_hash, quote_id=quote_id
+        )
         _log(
             conn, task_id, "dedup", "quote_reused",
-            {"reused_from": existing_quote_id}, result["quote_id"],
+            {"reused_from": existing_quote_id}, quote_id or result["quote_id"],
         )
         return {"quote_id": result["quote_id"], "status": "reused", "calc_check": result["calc_check"]}
 
@@ -110,25 +137,26 @@ def _process_file(conn: sqlite3.Connection, task_id: int, project_name: str, pat
         conn, task_id, "layout", "parsed",
         {"rows": len(ir.tables), "supplier": data["supplier"]["supplier_name"],
          "engine": "llm", "llm_attempts": llm_attempts},
+        quote_id,
     )
-    _log(conn, task_id, "layout", "cross_check", cross)
+    _log(conn, task_id, "layout", "cross_check", cross, quote_id)
 
     # ④ 校验（schema + 勾稽 + 枚举）
     check, flags = validate_quote_full(conn, data)
-    _log(conn, task_id, "validate", check, {"flags": flags})
+    _log(conn, task_id, "validate", check, {"flags": flags}, quote_id)
 
-    # ⑤ 落库（persist 自建连接提交）
-    result = persist_quote(data, project_name=project_name, task_id=task_id, file_hash=file_hash)
-    quote_id = result["quote_id"]
+    # ⑤ 落库（persist 自建连接提交；回填本文件占位行）
+    result = persist_quote(data, project_name=project_name, task_id=task_id, file_hash=file_hash, quote_id=quote_id)
+    qid = quote_id or result["quote_id"]
     _log(
         conn, task_id, "persist", "stored",
-        {"quote_id": quote_id, "calc_check": check, "flags": flags}, quote_id,
+        {"quote_id": qid, "calc_check": check, "flags": flags}, qid,
     )
 
     # ③ 语义映射
-    stats = run_mapping(quote_id, conn)
-    _log(conn, task_id, "match", "mapped", stats, quote_id)
-    return {"quote_id": quote_id, "status": "parsed", "calc_check": check, "flags": flags}
+    stats = run_mapping(qid, conn)
+    _log(conn, task_id, "match", "mapped", stats, qid)
+    return {"quote_id": qid, "status": "parsed", "calc_check": check, "flags": flags}
 
 
 def _set_task_status(conn: sqlite3.Connection, task_id: int, status: str) -> None:
@@ -163,10 +191,11 @@ def run_task(task_id: int, conn: sqlite3.Connection | None = None) -> dict:
         ]
         for upload in uploads:
             path = Path(upload["path"])
+            placeholder_id = upload.get("quote_id")  # create_task 预建占位行；旧日志无此字段则为 None
             try:
-                results.append(_process_file(conn, task["id"], task["project_name"], path))
+                results.append(_process_file(conn, task["id"], task["project_name"], path, placeholder_id))
             except LLMError as e:  # LLM 故障：不降级，中止整个任务并反馈错误
-                quote_id = _mark_failed(conn, task_id, upload["original_name"], "layout", e)
+                quote_id = _mark_failed(conn, task_id, upload["original_name"], "layout", e, placeholder_id)
                 _log(
                     conn, task_id, "layout", "llm_error",
                     {"error": str(e), "type": type(e).__name__,
@@ -177,10 +206,10 @@ def run_task(task_id: int, conn: sqlite3.Connection | None = None) -> dict:
                 return {"task_id": task_id, "task_status": "failed", "results": results,
                         "error": f"LLM 服务不可用，任务已中止：{e}"}
             except (ParseError, IngestParseError, ValidateError, ValueError, KeyError, json.JSONDecodeError) as e:
-                quote_id = _mark_failed(conn, task_id, upload["original_name"], "parse", e)
+                quote_id = _mark_failed(conn, task_id, upload["original_name"], "parse", e, placeholder_id)
                 results.append({"quote_id": quote_id, "status": "failed", "error": str(e)})
             except Exception as e:  # 兜底：单文件异常不拖垮整任务
-                quote_id = _mark_failed(conn, task_id, upload["original_name"], "parse", e)
+                quote_id = _mark_failed(conn, task_id, upload["original_name"], "parse", e, placeholder_id)
                 _log(
                     conn, task_id, "parse", "unexpected_error",
                     {"traceback": traceback.format_exc()}, quote_id,

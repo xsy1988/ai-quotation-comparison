@@ -221,7 +221,7 @@ def test_price_tree_basic_info(comparison):
 def test_price_tree_summary_rows(comparison):
     conn, task_id, qa, qb, result = comparison
     unit = _tree_node(result, "unit_price")
-    assert [c["key"] for c in unit["children"]][:3] == ["final", "discount", "untaxed"]
+    assert [c["key"] for c in unit["children"]][:3] == ["final", "untaxed", "discount"]
     assert _child(unit, "final")["values"][qa] == 10.61
     assert _child(unit, "final")["label"] == "计算总价（含税）"
     assert _child(unit, "discount")["values"][qb] is None
@@ -270,6 +270,72 @@ def test_price_tree_sga_all_tax_becomes_none(tmp_path, monkeypatch):
     result = get_comparison(conn, task_id)
     sga = _child(_tree_node(result, "unit_price"), "sga")
     assert sga["values"][qid] is None
+    conn.close()
+
+
+def test_price_tree_sga_total_tax_only_falls_back_to_items(tmp_path, monkeypatch):
+    """模块合计恰等于税费合计、但损管利明细有金额时（total 只落税费，如惠州豪泽单），
+    损管利行回退取非税费明细合计，而不是误报未报。"""
+    monkeypatch.setenv("QUOTES_DB_PATH", str(tmp_path / "sga2.db"))
+    init_db()
+    conn = get_connection()
+    quote = make_quote("供应商T2", False, False)
+    for item in quote["unit_price"]["processing"]["items"]:
+        item["atom_code"] = None  # 本用例不灌主数据，避免 atom 外键
+    quote["unit_price"]["sga_tax"] = {
+        "total": 2.5635,
+        "items": [
+            {"name": "不良率10%", "amount_per_pc": 1.56, "item_type": "损耗", "rate": 0.1, "note": None},
+            {"name": "管理5%", "amount_per_pc": 0.78, "item_type": "管理费", "rate": 0.05, "note": None},
+            {"name": "利润", "amount_per_pc": 1.19, "item_type": "利润", "rate": None, "note": None},
+            {"name": "税费13%", "amount_per_pc": 2.5635, "item_type": "税费", "rate": 0.13, "note": None},
+        ],
+    }
+    quote["unit_price"]["summary"]["tax_amount"] = 2.5635
+    with conn:
+        cur = conn.execute("INSERT INTO comparison_task (project_name, status) VALUES ('t', 'parsed')")
+        task_id = cur.lastrowid
+    qid = persist_quote(quote, task_id=task_id, file_hash="ht2")["quote_id"]
+    result = get_comparison(conn, task_id)
+    sga = _child(_tree_node(result, "unit_price"), "sga")
+    assert sga["values"][qid] == round(1.56 + 0.78 + 1.19, 6)
+    conn.close()
+
+
+def test_price_tree_material_name_falls_back_to_spec(tmp_path, monkeypatch):
+    """材料条目名为栏目名（原材料/材料费等）时，展示名回退用 basic.material_spec（真实牌号）。"""
+    monkeypatch.setenv("QUOTES_DB_PATH", str(tmp_path / "mat.db"))
+    init_db()
+    conn = get_connection()
+    quote = make_quote("供应商M", False, False)
+    for item in quote["unit_price"]["processing"]["items"]:
+        item["atom_code"] = None  # 本用例不灌主数据，避免 atom 外键
+    quote["basic"]["material_spec"] = "ADC12铝合金"
+    quote["unit_price"]["materials"]["items"] = [
+        {"name": "原材料", "amount_per_pc": 1.22, "spec": None, "note": None},
+    ]
+    with conn:
+        cur = conn.execute("INSERT INTO comparison_task (project_name, status) VALUES ('t', 'parsed')")
+        task_id = cur.lastrowid
+    qid = persist_quote(quote, task_id=task_id, file_hash="hm")["quote_id"]
+    result = get_comparison(conn, task_id)
+    materials = _child(_tree_node(result, "unit_price"), "materials")
+    row = materials["children"][0]
+    assert row["meta"][qid]["name"] == "ADC12铝合金"  # 栏目名 → 真实材料牌号
+    # 具体材料名不受影响
+    conn2 = conn
+    quote2 = make_quote("供应商M2", False, False)
+    for item in quote2["unit_price"]["processing"]["items"]:
+        item["atom_code"] = None
+    quote2["basic"]["material_spec"] = "ADC12铝合金"
+    quote2["unit_price"]["materials"]["items"] = [
+        {"name": "铝合金ADC12", "amount_per_pc": 1.21, "spec": None, "note": None},
+    ]
+    qid2 = persist_quote(quote2, task_id=task_id, file_hash="hm2")["quote_id"]
+    result = get_comparison(conn2, task_id)
+    materials = _child(_tree_node(result, "unit_price"), "materials")
+    row = materials["children"][0]
+    assert row["meta"][qid2]["name"] == "铝合金ADC12"
     conn.close()
 
 

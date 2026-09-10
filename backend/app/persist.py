@@ -115,9 +115,11 @@ def persist_quote(
     project_name: str | None = None,
     task_id: int | None = None,
     file_hash: str | None = None,
+    quote_id: int | None = None,
 ) -> dict:
     """落库。传 task_id 则归属既有任务（不新建 comparison_task，任务状态由流水线更新）；
-    传 file_hash 写入 quote.file_hash 供查重复用。"""
+    传 file_hash 写入 quote.file_hash 供查重复用；
+    传 quote_id 则回填流水线预建的占位行（UPDATE 而非 INSERT，行内明细先清后填）。"""
     validate_quote(data)
     check = calc_check(data)
     flags = collect_flags(data, check)
@@ -137,39 +139,52 @@ def persist_quote(
                 )
                 task_id = cur.lastrowid
 
-            cur = conn.execute(
-                """INSERT INTO quote
-                   (task_id, supplier_code, supplier_name, category_code, basic_info,
-                    final_unit_price_taxed, untaxed_total, tax_amount, discount,
-                    materials_total, processing_total, inspection_total,
-                    packaging_transport_total, sga_tax_total, other_total, tooling_total,
-                    raw_json_path, file_hash, flags, parse_status, calc_check)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'parsed', ?)""",
-                (
-                    task_id,
-                    data["supplier"].get("supplier_code"),
-                    data["supplier"].get("supplier_name"),
-                    basic.get("category"),
-                    json.dumps(basic, ensure_ascii=False),
-                    up["summary"].get("final_unit_price_taxed"),
-                    up["summary"].get("untaxed_total"),
-                    up["summary"].get("tax_amount"),
-                    up["summary"].get("discount"),
-                    module_total(up["materials"]),
-                    module_total(up["processing"]),
-                    module_total(up["inspection"]),
-                    module_total(up["packaging_transport"]),
-                    module_total(up["sga_tax"]),
-                    module_total(up["other"]),
-                    module_total(tooling) if tooling and tooling.get("total") is not None
-                    else (sum(module_total(tooling[k]) or 0 for k in ("molds", "fixtures", "stencils")) if tooling else None),
-                    None,
-                    file_hash,
-                    json.dumps(flags, ensure_ascii=False),
-                    check,
-                ),
+            column_values = (
+                data["supplier"].get("supplier_code"),
+                data["supplier"].get("supplier_name"),
+                basic.get("category"),
+                json.dumps(basic, ensure_ascii=False),
+                up["summary"].get("final_unit_price_taxed"),
+                up["summary"].get("untaxed_total"),
+                up["summary"].get("tax_amount"),
+                up["summary"].get("discount"),
+                module_total(up["materials"]),
+                module_total(up["processing"]),
+                module_total(up["inspection"]),
+                module_total(up["packaging_transport"]),
+                module_total(up["sga_tax"]),
+                module_total(up["other"]),
+                module_total(tooling) if tooling and tooling.get("total") is not None
+                else (sum(module_total(tooling[k]) or 0 for k in ("molds", "fixtures", "stencils")) if tooling else None),
+                file_hash,
+                json.dumps(flags, ensure_ascii=False),
+                check,
             )
-            quote_id = cur.lastrowid
+            if quote_id is not None:
+                conn.execute(
+                    """UPDATE quote SET supplier_code=?, supplier_name=?, category_code=?, basic_info=?,
+                               final_unit_price_taxed=?, untaxed_total=?, tax_amount=?, discount=?,
+                               materials_total=?, processing_total=?, inspection_total=?,
+                               packaging_transport_total=?, sga_tax_total=?, other_total=?, tooling_total=?,
+                               file_hash=?, flags=?, parse_status='parsed', calc_check=?,
+                               updated_at=datetime('now', 'localtime') WHERE id=?""",
+                    (*column_values, quote_id),
+                )
+                # 占位行重填：清掉旧明细（若有）再写入，保证幂等
+                conn.execute("DELETE FROM quote_line WHERE quote_id = ?", (quote_id,))
+                conn.execute("DELETE FROM tooling_line WHERE quote_id = ?", (quote_id,))
+            else:
+                cur = conn.execute(
+                    """INSERT INTO quote
+                       (task_id, supplier_code, supplier_name, category_code, basic_info,
+                        final_unit_price_taxed, untaxed_total, tax_amount, discount,
+                        materials_total, processing_total, inspection_total,
+                        packaging_transport_total, sga_tax_total, other_total, tooling_total,
+                        raw_json_path, file_hash, flags, parse_status, calc_check)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'parsed', ?)""",
+                    (task_id, *column_values[:15], None, *column_values[15:]),
+                )
+                quote_id = cur.lastrowid
 
             line_count = 0
             for name in MODULES:

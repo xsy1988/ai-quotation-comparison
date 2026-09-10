@@ -1,9 +1,10 @@
 """机械对比引擎（纯脚本，SQL 聚合）：层级金额对比 + 加工费维度抽屉 + 指纹对齐 + 模治具 + 警示汇总。
 
-空值语义：供应商未报某模块/抽屉时值为 null（前端显示"路线未含此工序"），绝不当作 0。
+空值语义：供应商未报某模块/抽屉时值为 null（前端显示"/"），绝不当作 0。
 """
 
 import json
+import re
 import sqlite3
 
 FALLBACK_ATOM_CODE = "AT-QT-001"
@@ -28,11 +29,12 @@ OTHER_PROCESS_BUCKET_CODE = "other_process"
 
 
 def _task_quotes(conn: sqlite3.Connection, task_id: int) -> list[sqlite3.Row]:
+    # 只取已完成的报价单：pending 占位行（进度展示用）与 failed 行不进比价视图
     return list(
         conn.execute(
             "SELECT id, supplier_name, supplier_code, flags, calc_check, final_unit_price_taxed,"
             " category_code, basic_info"
-            " FROM quote WHERE task_id = ? ORDER BY id",
+            " FROM quote WHERE task_id = ? AND parse_status IN ('parsed', 'reviewed') ORDER BY id",
             (task_id,),
         )
     )
@@ -419,10 +421,31 @@ def _processing_children(
     return children
 
 
-def _material_children(conn: sqlite3.Connection, quote_ids: list[int]) -> list[dict]:
+_GENERIC_MATERIAL_BASES = ("材料费", "材料费用", "原材料", "材料", "原料", "材质", "金属材料")
+_GENERIC_MATERIAL_RE = re.compile(r"^(?:材料费|材料费用|原材料|材料|原料|材质|金属材料)\s*([（(].*[)）])$")
+
+
+def _material_display_name(item_name: str | None, spec: str | None) -> str | None:
+    """材料条目标题回退：LLM 把条目命名为栏目名（原材料/材料费等）时，
+    用 basic.material_spec 展示真实材料（牌号），括号后缀保留。"""
+    if not item_name or not spec:
+        return item_name
+    stripped = item_name.strip()
+    if stripped in _GENERIC_MATERIAL_BASES:
+        return spec
+    m = _GENERIC_MATERIAL_RE.match(stripped)
+    if m:
+        return f"{spec}{m.group(1)}"
+    return item_name
+
+
+def _material_children(
+    conn: sqlite3.Connection, quote_ids: list[int], material_spec: dict[int, str | None],
+) -> list[dict]:
     """材料费明细 children：材料名称为自由文本，无法按名对齐；
     按各家报价内出现位置跨供应商对齐（第 N 种材料同一行），
-    单元格 meta 带各家自己的材料名称与备注，前端名称+金额同格展示。"""
+    单元格 meta 带各家自己的材料名称与备注，前端名称+金额同格展示。
+    条目名是栏目名（原材料/材料费等）时回退用 material_spec 展示。"""
     if not quote_ids:
         return []
     placeholders = ",".join("?" for _ in quote_ids)
@@ -451,7 +474,7 @@ def _material_children(conn: sqlite3.Connection, quote_ids: list[int]) -> list[d
             item = items[idx]
             amount = item["amount"]
             values[qid] = round(amount, 6) if amount is not None else None
-            entry = {"name": item["item_name"]}
+            entry = {"name": _material_display_name(item["item_name"], material_spec.get(qid))}
             if item.get("note") is not None:
                 entry["note"] = item["note"]
             meta[qid] = entry
@@ -468,16 +491,24 @@ def _material_children(conn: sqlite3.Connection, quote_ids: list[int]) -> list[d
 
 
 def _sga_values(
-    totals: dict[int, float | None], tax_rows: list[dict], quote_ids: list[int]
+    totals: dict[int, float | None], tax_rows: list[dict], non_tax_rows: list[dict],
+    quote_ids: list[int],
 ) -> dict[int, float | None]:
     """损管利展示值 = sga_tax 模块合计 − 税费明细合计。
-    取舍：若差为 0 且原合计全部来自税费（供应商只报了税费），该行视为"未报损管利" → None；
-    未报整个模块（合计为 None）→ None，均不按 0 处理。"""
+    取舍：若差为 0 且原合计全部来自税费，回退按非税费明细合计取值
+    （报价单 total 只含税费但损管利条目有金额时，如惠州豪泽单）；
+    两者皆无（供应商只报了税费）→ None；未报整个模块（合计为 None）→ None，均不按 0 处理。"""
     tax_sum_by_q: dict[int, float] = {}
     for row in tax_rows:
         if row["amount"] is not None:
             tax_sum_by_q[row["quote_id"]] = round(
                 tax_sum_by_q.get(row["quote_id"], 0) + row["amount"], 6
+            )
+    non_tax_sum_by_q: dict[int, float] = {}
+    for row in non_tax_rows:
+        if row["amount"] is not None:
+            non_tax_sum_by_q[row["quote_id"]] = round(
+                non_tax_sum_by_q.get(row["quote_id"], 0) + row["amount"], 6
             )
     values: dict[int, float | None] = {}
     for qid in quote_ids:
@@ -490,7 +521,12 @@ def _sga_values(
             values[qid] = total
             continue
         diff = round(total - tax_sum, 6)
-        values[qid] = diff if diff != 0 else None
+        if diff != 0:
+            values[qid] = diff
+            continue
+        # 合计与税费相等：优先取非税费明细合计，确实没有损管利条目才视为未报
+        non_tax_sum = non_tax_sum_by_q.get(qid)
+        values[qid] = non_tax_sum if non_tax_sum else None
     return values
 
 
@@ -601,12 +637,13 @@ def _price_tree(
     unit_children: list[dict] = [
         {"key": "final", "label": "计算总价（含税）", "kind": "amount",
          "values": summary_values("final_unit_price_taxed")},
-        {"key": "discount", "label": "折扣（含税）", "kind": "amount",
-         "values": summary_values("discount")},
         {"key": "untaxed", "label": "计算总价（未税）", "kind": "amount",
          "values": summary_values("untaxed_total")},
+        {"key": "discount", "label": "折扣（含税）", "kind": "amount",
+         "values": summary_values("discount")},
         group("materials", "材料费", totals["materials"],
-              _material_children(conn, quote_ids)),
+              _material_children(conn, quote_ids,
+                                 {b["quote_id"]: b["material_spec"] for b in basic})),
         group("processing", "生产加工费", totals["processing"],
               _processing_children(quote_ids, processing_details, atom_names, atom_scope)),
         group("inspection", "检验费", totals["inspection"],
@@ -617,7 +654,7 @@ def _price_tree(
                                      quote_ids, "packaging_transport",
                                      order=("包装", "运输"),
                                      labels={"包装": "包装费", "运输": "运输费"})),
-        group("sga", "损管利", _sga_values(totals["sga_tax"], sga_tax_rows, quote_ids),
+        group("sga", "损管利", _sga_values(totals["sga_tax"], sga_tax_rows, sga_non_tax_rows, quote_ids),
               _typed_detail_children(sga_non_tax_rows, quote_ids, "sga",
                                      order=SGA_NON_TAX_TYPES)),
         group("tax", "税费",

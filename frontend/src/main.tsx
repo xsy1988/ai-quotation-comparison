@@ -1,4 +1,4 @@
-import { ConfigProvider, theme as antdTheme } from 'antd'
+import { ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
@@ -29,16 +29,22 @@ export default function Main() {
     <ConfigProvider
       locale={zhCN}
       theme={{
-        algorithm: antdTheme.compactAlgorithm,
         token: {
           colorPrimary: '#1677ff',
-          borderRadius: 4,
-          fontSize: 13,
+          borderRadius: 6,
+          fontSize: 14,
+          fontFamily:
+            '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
         },
         components: {
           Table: {
-            cellPaddingBlock: 8,
-            cellPaddingInline: 10,
+            cellPaddingBlock: 12,
+            cellPaddingInline: 14,
+            headerBg: '#f5f7fa',
+            rowHoverBg: '#f0f7ff',
+          },
+          Card: {
+            headerFontSize: 15,
           },
         },
       }}

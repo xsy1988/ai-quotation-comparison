@@ -1,7 +1,7 @@
 """文件接入（流水线段⓪①）：sha256 查重门禁 + 全格式 → IR + 原件归档 + IR 快照。
 
-格式分派：.xlsx/.xlsm → excel_to_ir；.docx/.pdf → app.ingest_formats（结构化抽取）；
-.png/.jpg/.jpeg → app.ingest_formats.image_to_ir（vision OCR，失败上抛不降级）。
+格式分派：.xlsx/.xlsm → excel_to_ir；.docx/.pdf → app.ingest_formats（结构化抽取，
+PDF 扫描页自动渲染为图片走 vision OCR）；.png/.jpg/.jpeg → app.ingest_formats.image_to_ir（vision OCR，失败上抛不降级）。
 查重门禁与归档/登记逻辑全格式共用。
 """
 

@@ -51,6 +51,8 @@ _SCHEMA_BRIEF = """把报价单解析为 JSON，严格符合 quote_schema v1.1�
 
 各模块 items 字段（required 标*）：
 - materials: {name*, amount_per_pc*, spec: 字符串|null, note: 字符串|null, evidence}
+  （name 必须用材料的具体名称/牌号，如"ADC12铝合金"，与 basic.material_spec 保持一致；
+  不要用"原材料/材料费/材料"这类栏目名）
 - processing: {name*, amount_per_pc*, atom_code: null, is_new_process: false, bundle_flag: false,
   confidence: "low", match_path: null, confirm_status: "unconfirmed", note: 字符串|null, evidence}
   （工艺原子映射是后续阶段的事：atom_code 一律 null、confidence 一律 "low"、match_path 一律 null；

@@ -101,8 +101,8 @@ export default function ComparisonPage() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card size="small" title={`任务 #${data.task_id} 比价结果`}>
-        <Descriptions size="small" column={3}>
+      <Card title={`任务 #${data.task_id} 比价结果`}>
+        <Descriptions column={3}>
           <Descriptions.Item label="供应商">
             <Space wrap>
               {data.suppliers.map((s) => (
@@ -117,7 +117,7 @@ export default function ComparisonPage() {
           <Descriptions.Item label="报价单数">{data.suppliers.length}</Descriptions.Item>
           <Descriptions.Item label="空值语义说明">
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              “路线未含此工序” = 该供应商未报此行，未按 0 处理
+              “/” = 该供应商未报此行，未按 0 处理
             </Typography.Text>
           </Descriptions.Item>
         </Descriptions>
@@ -157,7 +157,7 @@ export default function ComparisonPage() {
         </Card>
       ) : (
         <>
-          <Card size="small" title="层级金额对比">
+          <Card title="层级金额对比">
             {data.price_tree.length === 0 ? (
               <Empty />
             ) : (
@@ -165,11 +165,11 @@ export default function ComparisonPage() {
             )}
           </Card>
 
-          <Card size="small" title="加工费专区（维度抽屉）">
+          <Card title="加工费专区（维度抽屉）">
             <DrawerTabs comparison={data} />
           </Card>
 
-          <Card size="small" title="指纹对齐（打包口径对齐）">
+          <Card title="指纹对齐（打包口径对齐）">
             {data.fingerprint_groups.length === 0 ? (
               <Empty description="无打包指纹数据" />
             ) : (

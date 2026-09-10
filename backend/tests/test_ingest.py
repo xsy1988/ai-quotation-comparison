@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app import ingest, ingest_formats
-from app.ingest import ParseError, excel_to_ir, ingest_file, sha256_of
+from app.ingest import excel_to_ir, ingest_file, sha256_of
 from app.llm.client import LLMError, LLMUnavailable
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -91,10 +91,62 @@ def test_pdf_to_ir_with_text_layer(sandbox):
     assert any("Material Fee" in b.text for b in ir.blocks)
 
 
-def test_pdf_to_ir_no_text_layer_raises_chinese_error(sandbox):
+def _ocr_chat_json_factory(calls: list, lines: str):
+    def fake_chat_json(messages, *, model=None, client=None):
+        calls.append(messages)
+        return {"lines": lines}, {"model": model}
+
+    return fake_chat_json
+
+
+def test_pdf_to_ir_no_text_layer_uses_vision_ocr(sandbox, monkeypatch):
+    """无文字层扫描页：pypdfium2 渲染 → vision OCR，结果归入 page_N sheet。"""
+    calls = []
+    monkeypatch.setattr(
+        "app.llm.client.chat_json",
+        _ocr_chat_json_factory(calls, "ocr|1|1:供应商报价单\nocr|2|1:加工费|2:2.00"),
+    )
     path = _make_pdf(sandbox / "scan.pdf", with_text=False)
-    with pytest.raises(ParseError, match="PDF 无文字层，暂不支持扫描版 PDF，请转为图片上传"):
-        ingest_formats.pdf_to_ir(path, "hash")
+
+    ir = ingest_formats.pdf_to_ir(path, "hash")
+
+    assert ir.file_type == "pdf"
+    assert ir.sheets == ["page_1"]
+    assert [(t.sheet, t.row_number, [(c.col, c.value) for c in t.cells]) for t in ir.tables] == [
+        ("page_1", 1, [(1, "供应商报价单")]),
+        ("page_1", 2, [(1, "加工费"), (2, "2.00")]),
+    ]
+    # 渲染后的 PNG 送进了 vision OCR
+    content = calls[0][0]["content"]
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_pdf_to_ir_mixed_text_and_scan_pages(sandbox, monkeypatch):
+    """混合文档：第 1 页文字层直接抽取，第 2 页扫描页走 OCR，各自归入 page_N。"""
+    calls = []
+    monkeypatch.setattr(
+        "app.llm.client.chat_json",
+        _ocr_chat_json_factory(calls, "ocr|1|1:盖章页"),
+    )
+    reportlab = pytest.importorskip("reportlab")
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    path = sandbox / "mixed.pdf"
+    c = canvas.Canvas(str(path), pagesize=A4)
+    c.drawString(72, 720, "Material Fee 4.50")
+    c.showPage()
+    c.rect(72, 700, 100, 20)  # 第 2 页只画图无文字
+    c.showPage()
+    c.save()
+
+    ir = ingest_formats.pdf_to_ir(path, "hash")
+
+    assert ir.sheets == ["page_1", "page_2"]
+    assert any("Material Fee" in b.text and b.sheet == "page_1" for b in ir.blocks)
+    assert [(t.sheet, t.cells[0].value) for t in ir.tables] == [("page_2", "盖章页")]
+    assert len(calls) == 1  # 只有第 2 页走了 OCR
 
 
 # ---------------------------------------------------------------------------
@@ -222,10 +274,20 @@ def test_ingest_file_dedup_gate_still_applies(sandbox):
     assert forced["status"] == "ingested"
 
 
-def test_ingest_file_no_text_pdf_raises_chinese_error(sandbox):
+def test_ingest_file_no_text_pdf_uses_ocr(sandbox, monkeypatch):
+    """扫描版 PDF 经 ingest_file 全链路：渲染 + OCR 成功后正常归档登记。"""
+    monkeypatch.setattr(
+        "app.llm.client.chat_json",
+        _ocr_chat_json_factory([], "ocr|1|1:供应商报价单"),
+    )
     path = _make_pdf(sandbox / "scan.pdf", with_text=False)
-    with pytest.raises(ParseError, match="PDF 无文字层"):
-        ingest_file(path)
+    result = ingest_file(path)
+
+    assert result["status"] == "ingested"
+    assert result["sheets"] == ["page_1"]
+    ir_data = json.loads(Path(result["ir_path"]).read_text(encoding="utf-8"))
+    assert ir_data["file_type"] == "pdf"
+    assert ir_data["tables"][0]["sheet"] == "page_1"
 
 
 def test_excel_baseline_unchanged(sandbox):

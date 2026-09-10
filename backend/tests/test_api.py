@@ -1,5 +1,6 @@
 """API 端到端：创建任务、comparison 结构、tasks 列表、SSE 首帧、404。"""
 
+import json
 import os
 import subprocess
 import sys
@@ -94,6 +95,38 @@ def test_tasks_list(prepared):
     assert tasks[0]["project_name"] == "列表项目2"  # 倒序
     assert tasks[0]["quote_count"] == 1
     assert tasks[0]["status"] == "parsed"
+
+
+def test_progress_shows_pending_placeholders_immediately(prepared):
+    """任务一创建（流水线未跑），进度接口首帧即列出每个文件的占位进度。
+
+    直接驱动 SSE 生成器断言首帧（TestClient 的流传输对长连接流不稳定，不走它）。
+    """
+    import asyncio
+
+    from app.api.tasks import task_progress
+    from app.db import get_connection
+    from app.pipeline.pipeline import create_task
+
+    conn = get_connection()
+    task_id = create_task(
+        conn, "占位进度",
+        [("甲供应商.xlsx", FIXTURE.read_bytes()), ("乙供应商.xlsx", FIXTURE.read_bytes())],
+    )
+    conn.close()
+
+    resp = task_progress(task_id)
+
+    async def first_frame() -> str:
+        return await resp.body_iterator.__anext__()
+
+    chunk = asyncio.run(first_frame())
+    payload = json.loads(chunk.removeprefix("event: progress\ndata: "))
+    assert payload["task_status"] == "parsing"
+    assert [(q["supplier_name"], q["parse_status"], q["stage"]) for q in payload["quotes"]] == [
+        ("甲供应商.xlsx", "pending", None),
+        ("乙供应商.xlsx", "pending", None),
+    ]
 
 
 def test_progress_sse(prepared):

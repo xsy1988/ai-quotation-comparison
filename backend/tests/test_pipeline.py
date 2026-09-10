@@ -64,6 +64,11 @@ def test_create_task_writes_uploads(prepared):
     assert (tmp_path / "uploads" / str(task_id) / "sample_quote.xlsx").exists()
     logs = conn.execute("SELECT COUNT(*) FROM parse_log WHERE task_id = ? AND stage='task'", (task_id,)).fetchone()[0]
     assert logs == 1
+    # 预建 quote 占位行：进度页在上传后立即可见该文件（流水线未跑也是 pending）
+    quotes = conn.execute(
+        "SELECT supplier_name, parse_status FROM quote WHERE task_id = ?", (task_id,)
+    ).fetchall()
+    assert [(q["supplier_name"], q["parse_status"]) for q in quotes] == [("sample_quote.xlsx", "pending")]
     conn.close()
 
 

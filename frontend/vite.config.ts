@@ -5,7 +5,8 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [react()],
   server: {
-    host: '127.0.0.1',
+    // 0.0.0.0：本机与局域网（其他电脑经本机 IP 访问 demo）均可访问
+    host: '0.0.0.0',
     port: Number(process.env.VITE_PORT || 8003),
   },
 })

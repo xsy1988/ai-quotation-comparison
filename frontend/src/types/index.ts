@@ -1,5 +1,5 @@
 // 与 backend/app/compare/compare_engine.py 的 get_comparison 输出对齐
-// 空值语义：供应商未报某行/抽屉时值为 null（渲染"路线未含此工序"），绝不当作 0
+// 空值语义：供应商未报某行/抽屉时值为 null（渲染"/"），绝不当作 0
 
 export interface Supplier {
   quote_id: number

@@ -14,6 +14,15 @@ const STAGE_INDEX: Record<string, number> = {
   validate: 4,
   persist: 4,
 }
+// 进度条上方状态标签的友好文案
+const STAGE_LABEL: Record<string, string> = {
+  task: '已上传',
+  dedup: '接入查重',
+  layout: '版面解析',
+  match: '语义映射',
+  validate: '校验',
+  persist: '落库',
+}
 
 const DONE_STATUSES = new Set(['parsed', 'reviewed'])
 const FAILED_STATUSES = new Set(['failed', 'parse_failed'])
@@ -138,7 +147,9 @@ export default function ProgressPage() {
                     ) : done ? (
                       <Tag color="green">解析完成</Tag>
                     ) : (
-                      <Tag color="processing">{quote.stage ?? '排队中'}</Tag>
+                      <Tag color="processing">
+                        {quote.stage ? (STAGE_LABEL[quote.stage] ?? quote.stage) : '排队中'}
+                      </Tag>
                     )}
                   </div>
                   {failed && quote.error && (

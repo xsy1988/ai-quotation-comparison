@@ -6,7 +6,7 @@ import type { Comparison, PriceTreeNode, ProcessingItem, Supplier } from '../typ
 import Amount, { NA_TEXT } from './Amount'
 import ProcessingItemCell from './ProcessingItemCell'
 
-const NA_DETAIL_TEXT = '路线未含此项'
+const NA_DETAIL_TEXT = '/'
 
 /** 加工费明细行 kind=amount 且 meta 带 quote_line id → 就地编辑（分组行除外） */
 function isProcessingDetail(node: PriceTreeNode): boolean {
@@ -33,6 +33,22 @@ const PROC_SCOPE_OPTIONS = [
 
 const UNMATCHED_KEY = '__unmatched__'
 
+/** 分组排序的制造工艺理序（通用流程直觉）：基板/SMT → 成型 → 去料/机加 → 热处理 →
+ *  焊接/贴合 → 表面整平 → 清洁 → 转化膜/电镀/涂装 → 印刷 → 固化 → 组装 → 检测 → 返修/其他。
+ *  未匹配恒排最后；表中未收录的工艺保持出现顺序跟在后面。 */
+const PROC_GROUP_ORDER: Record<ProcScope, string[]> = {
+  domain: [
+    'JB', 'XY', 'YJ', 'BC', 'CX', 'LH', 'QL', 'QX', 'TJ', 'FQ', 'MQ', 'DJ', 'RC',
+    'HJ', 'FB', 'TH', 'ZJ', 'ZP', 'WL', 'QJ', 'ZH', 'DD', 'ZK', 'TZ', 'TF', 'YS',
+    'BH', 'YZ', 'GH', 'ZZ', 'ZD', 'JC', 'FX', 'QT',
+  ],
+  stage: [
+    '毛坯', 'SMT制程', 'THT制程', '机加', '后加工', '表面前处理', '成膜', '装饰',
+    '后处理', '组装', '测试', '其他',
+  ],
+  class: ['成型加工', '主制程', '后工序'],
+}
+
 function hasAnyValue(node: PriceTreeNode): boolean {
   // 金额为 0 视同未报：所有供应商都是 0 或 null → 不显示
   return Object.values(node.values).some(
@@ -44,6 +60,7 @@ function hasAnyValue(node: PriceTreeNode): boolean {
  * 全供应商均为 0 或未报的条目/分组不显示。 */
 function groupProcessing(children: PriceTreeNode[], scope: ProcScope): PriceTreeNode[] {
   const groups = new Map<string, PriceTreeNode>()
+  const codeOf = new Map<string, string>()
   for (const child of children) {
     if (!hasAnyValue(child)) continue // 所有供应商都是 0/未报 → 不进对比项
     const g = child.scope_meta?.[scope]
@@ -58,6 +75,7 @@ function groupProcessing(children: PriceTreeNode[], scope: ProcScope): PriceTree
         children: [],
       }
       groups.set(gKey, group)
+      codeOf.set(group.key, gKey)
     }
     group.children!.push(child)
   }
@@ -75,6 +93,15 @@ function groupProcessing(children: PriceTreeNode[], scope: ProcScope): PriceTree
     group.values = values
     if (hasAnyValue(group)) result.push(group) // 分组合计全为 0/未报 → 整组不显示
   }
+  // 按制造工艺理序排：同序保持出现顺序（sort 稳定），未匹配恒最后
+  const order = PROC_GROUP_ORDER[scope]
+  const rank = (key: string): number => {
+    const code = codeOf.get(key)
+    if (!code || code === UNMATCHED_KEY) return Number.MAX_SAFE_INTEGER
+    const i = order.indexOf(code)
+    return i === -1 ? order.length : i
+  }
+  result.sort((a, b) => rank(a.key) - rank(b.key))
   return result
 }
 
@@ -99,22 +126,73 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
     return price_tree.map(mapNode)
   }, [price_tree, procScope])
 
-  // 受控展开：数据/分组口径变化时重新全部展开（defaultExpandAllRows 对异步数据不可靠）
-  const allKeys = useMemo(() => {
-    const keys: string[] = []
-    const walk = (nodes: PriceTreeNode[]) => {
+  // 受控展开：仅 产品单价 顶层模块默认展开；基本信息、产品单价下的各费用模块
+  // （材料/生产加工/检验/包装运输/损管利/税费等）与 模/治具费用 及其所有子项均默认折叠。
+  // 只在数据变化时重置为默认；切换加工费分组口径不重置（见 switchProcScope）。
+  const [expandedKeys, setExpandedKeys] = useState<string[]>(['unit_price'])
+  useEffect(() => setExpandedKeys(['unit_price']), [price_tree])
+
+  // 切换 工艺域/阶段/类别：展开到生产加工费的子一级分组这一层（分组可见但保持折叠，
+  // 其明细子级不展开），剔除旧口径的分组键，其余模块的展开状态保持不变
+  const switchProcScope = (scope: ProcScope) => {
+    setProcScope(scope)
+    setExpandedKeys((prev) => [
+      ...prev.filter((k) => k !== 'processing' && !k.startsWith('processing::')),
+      'processing',
+    ])
+  }
+
+  // 每个节点在树中的层级深度（0=顶层模块），用于父子层级底色区分
+  const depthByKey = useMemo(() => {
+    const map = new Map<string, number>()
+    const walk = (nodes: PriceTreeNode[], depth: number) => {
       for (const n of nodes) {
-        if (n.children?.length) {
-          keys.push(n.key)
-          walk(n.children)
-        }
+        map.set(n.key, depth)
+        if (n.children?.length) walk(n.children, depth + 1)
       }
+    }
+    walk(tree, 0)
+    return map
+  }, [tree])
+
+  // 同一层级内相邻行：同色系深浅交替（斑马纹），避免相邻行底色糊在一起
+  const altKeys = useMemo(() => {
+    const keys = new Set<string>()
+    const walk = (nodes: PriceTreeNode[]) => {
+      nodes.forEach((n, i) => {
+        if (i % 2 === 1) keys.add(n.key)
+        if (n.children?.length) walk(n.children)
+      })
     }
     walk(tree)
     return keys
   }, [tree])
-  const [expandedKeys, setExpandedKeys] = useState<string[]>(allKeys)
-  useEffect(() => setExpandedKeys(allKeys), [allKeys])
+
+  // 计算总价（含税）最低价的供应商列（null 值不参与比价）
+  const lowestFinalQids = useMemo(() => {
+    const finalNode = tree
+      .find((n) => n.key === 'unit_price')
+      ?.children?.find((n) => n.key === 'final')
+    const entries = Object.entries(finalNode?.values ?? {}).filter(
+      (e): e is [string, number] => typeof e[1] === 'number',
+    )
+    if (entries.length === 0) return new Set<string>()
+    const min = Math.min(...entries.map(([, v]) => v))
+    return new Set(entries.filter(([, v]) => Math.abs(v - min) < 1e-9).map(([q]) => q))
+  }, [tree])
+
+  const SUMMARY_KEYS = new Set(['final', 'untaxed', 'discount'])
+
+  const rowClassName = (node: PriceTreeNode) => {
+    const classes = [`hier-l${Math.min(depthByKey.get(node.key) ?? 0, 3)}`]
+    // 总价/折扣行：中性浅灰底，脱离层级色系与斑马纹，降低视觉引导
+    if (SUMMARY_KEYS.has(node.key)) {
+      classes.push('summary-row')
+    } else if (altKeys.has(node.key)) {
+      classes.push('hier-alt')
+    }
+    return classes.join(' ')
+  }
 
   const columns: TableProps<PriceTreeNode>['columns'] = [    {
       title: '项目',
@@ -132,7 +210,7 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
                 menu={{
                   items: PROC_SCOPE_OPTIONS.map((o) => ({ key: o.value, label: o.label })),
                   selectedKeys: [procScope],
-                  onClick: ({ key }) => setProcScope(key as ProcScope),
+                  onClick: ({ key }) => switchProcScope(key as ProcScope),
                 }}
               >
                 <Button size="small">
@@ -143,7 +221,7 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
             </div>
           )
         }
-        const strong = node.kind === 'group' || node.key === 'final'
+        const strong = node.kind === 'group'
         // 明细行备注/原文名称：tooltip 展示
         const metas = Object.values(node.meta ?? {})
         const tips = metas
@@ -152,8 +230,8 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
         const label = (
           <span
             style={
-              node.key === 'final'
-                ? { fontWeight: 700, background: '#fff7e6', padding: '2px 6px', borderRadius: 4 }
+              node.key === 'unit_price'
+                ? { fontWeight: 700, color: '#d4380d' }
                 : strong
                   ? { fontWeight: 600 }
                   : undefined
@@ -178,6 +256,11 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
       ),
       key: `q${s.quote_id}`,
       align: 'right' as const,
+      // 产品单价行最低价单元格：浅绿底标识（内联样式，压过层级底色）
+      onCell: (node: PriceTreeNode) =>
+        node.key === 'unit_price' && lowestFinalQids.has(String(s.quote_id))
+          ? { style: { background: '#f0fff4' } }
+          : {},
       render: (_: unknown, node: PriceTreeNode) => {
         const raw = node.values[String(s.quote_id)]
         const meta = node.meta?.[String(s.quote_id)]
@@ -221,14 +304,27 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
           node.key.startsWith('materials::') && meta?.name ? (
             <div style={{ fontSize: 12, color: '#888' }}>{meta.name}</div>
           ) : null
+        // 包装运输/损管利等明细行的类型标签（包装/运输、损耗/管理费等）；包装运输行标签与行名重复，不再显示
         const typeTag =
-          isDetailRow(node) && meta?.item_type && meta.item_type !== node.label ? (
+          isDetailRow(node) &&
+          !node.key.startsWith('packaging_transport::') &&
+          meta?.item_type &&
+          meta.item_type !== node.label ? (
             <Tag style={{ marginLeft: 4 }}>{meta.item_type}</Tag>
           ) : null
+        const isEmphasisRow = node.key === 'unit_price'
+        const isLowest = isEmphasisRow && lowestFinalQids.has(String(s.quote_id))
         return (
           <>
             {nameLine}
-            <Amount value={value} strong={node.key === 'final'} />
+            <span style={isEmphasisRow ? { color: '#d4380d', fontWeight: 700 } : undefined}>
+              <Amount value={value} />
+            </span>
+            {isLowest && (
+              <Tag color="green" style={{ marginLeft: 4 }}>
+                最低
+              </Tag>
+            )}
             {rateSuffix}
             {typeTag}
           </>
@@ -239,12 +335,14 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
 
   return (
     <Table<PriceTreeNode>
-      size="small"
+      size="middle"
       rowKey="key"
       columns={columns}
       dataSource={tree}
       pagination={false}
       bordered
+      sticky
+      rowClassName={rowClassName}
       expandable={{
         expandedRowKeys: expandedKeys,
         onExpandedRowsChange: (keys) => setExpandedKeys(keys as string[]),
