@@ -59,7 +59,7 @@ def _quote_error(row) -> str | None:
 @router.post("")
 def post_task(
     background_tasks: BackgroundTasks,
-    project_name: str = Form(...),
+    project_name: str = Form(""),
     files: list[UploadFile] = File(default=[]),
 ) -> dict:
     if not files:

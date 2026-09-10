@@ -2,8 +2,6 @@ import { useState } from 'react'
 import {
   Button,
   Card,
-  Form,
-  Input,
   List,
   message,
   Modal,
@@ -21,7 +19,6 @@ const DONE_STATUSES = new Set(['parsed', 'reviewed'])
 
 export default function CreatePage() {
   const navigate = useNavigate()
-  const [form] = Form.useForm<{ project_name: string }>()
   const [fileList, setFileList] = useState<import('antd').UploadFile[]>([])
   const [historyOpen, setHistoryOpen] = useState(false)
 
@@ -32,8 +29,7 @@ export default function CreatePage() {
   })
 
   const mutation = useMutation({
-    mutationFn: ({ files, projectName }: { files: File[]; projectName: string }) =>
-      createTask(files, projectName),
+    mutationFn: (files: File[]) => createTask(files),
     onSuccess: ({ task_id }) => {
       message.success('对比任务已创建，开始解析')
       navigate(`/tasks/${task_id}/progress`)
@@ -43,8 +39,7 @@ export default function CreatePage() {
     },
   })
 
-  const submit = async () => {
-    const values = await form.validateFields()
+  const submit = () => {
     const rawFiles = fileList
       .map((f) => f.originFileObj)
       .filter((f): f is NonNullable<typeof f> => f instanceof File)
@@ -52,7 +47,7 @@ export default function CreatePage() {
       message.warning('请至少上传一个报价文件（.xlsx / .pdf）')
       return
     }
-    mutation.mutate({ files: rawFiles, projectName: values.project_name })
+    mutation.mutate(rawFiles)
   }
 
   return (
@@ -65,38 +60,32 @@ export default function CreatePage() {
           历史任务
         </Button>
       </div>
-      <Form form={form} layout="vertical">
-        <Form.Item
-          name="project_name"
-          label="项目名称"
-          rules={[{ required: true, message: '请填写项目名称' }]}
+      <div>
+        <Typography.Paragraph style={{ marginBottom: 8 }}>
+          报价文件（.xlsx / .pdf，可多选多家供应商）
+        </Typography.Paragraph>
+        <Upload.Dragger
+          multiple
+          accept=".xlsx,.pdf"
+          fileList={fileList}
+          beforeUpload={(file) => {
+            const lower = file.name.toLowerCase()
+            if (!lower.endsWith('.xlsx') && !lower.endsWith('.pdf')) {
+              message.error(`仅支持 .xlsx / .pdf 文件：${file.name}`)
+              return Upload.LIST_IGNORE
+            }
+            return false // 阻止自动上传，提交时手动上传
+          }}
+          onChange={({ fileList: list }) => setFileList(list)}
         >
-          <Input placeholder="例如：新能源汽车电控壳体" />
-        </Form.Item>
-        <Form.Item label="报价文件（.xlsx / .pdf，可多选多家供应商）" required>
-          <Upload.Dragger
-            multiple
-            accept=".xlsx,.pdf"
-            fileList={fileList}
-            beforeUpload={(file) => {
-              const lower = file.name.toLowerCase()
-              if (!lower.endsWith('.xlsx') && !lower.endsWith('.pdf')) {
-                message.error(`仅支持 .xlsx / .pdf 文件：${file.name}`)
-                return Upload.LIST_IGNORE
-              }
-              return false // 阻止自动上传，提交时手动上传
-            }}
-            onChange={({ fileList: list }) => setFileList(list)}
-          >
-            <p className="ant-upload-drag-icon">
-              <InboxOutlined />
-            </p>
-            <p className="ant-upload-text">点击或拖拽报价文件到此区域</p>
-            <p className="ant-upload-hint">每个文件视为一家供应商的报价单，扫描版 PDF 也可解析</p>
-          </Upload.Dragger>
-        </Form.Item>
+          <p className="ant-upload-drag-icon">
+            <InboxOutlined />
+          </p>
+          <p className="ant-upload-text">点击或拖拽报价文件到此区域</p>
+          <p className="ant-upload-hint">每个文件视为一家供应商的报价单，扫描版 PDF 也可解析</p>
+        </Upload.Dragger>
         <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          品类由 Agent 依据报价内容自动判定，无需手动选择。
+          任务名称将按报价文件名自动命名，可在历史任务中通过名称和创建时间区分。
         </Typography.Paragraph>
         <Button
           type="primary"
@@ -107,7 +96,7 @@ export default function CreatePage() {
         >
           提交并开始解析
         </Button>
-      </Form>
+      </div>
 
       <Modal
         title="历史任务"

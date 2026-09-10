@@ -6,6 +6,8 @@ ingest/persist 自建连接提交；本模块的日志/状态更新走传入 con
 """
 
 import json
+import os
+import re
 import sqlite3
 import traceback
 from pathlib import Path
@@ -26,15 +28,28 @@ UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"
 FINAL_TASK_STATUS = "parsed"
 
 
+def _auto_project_name(filenames: list[str]) -> str:
+    """任务自动命名：取报价文件名（去扩展名）的公共前缀（通常是零件名）；
+    无公共前缀时用首个文件名 + 家数。用户再结合创建时间/任务 ID 区分历史任务。"""
+    stems = [re.sub(r"\.(xlsx|pdf)$", "", f, flags=re.IGNORECASE).strip() for f in filenames]
+    stems = [s for s in stems if s] or ["未命名报价"]
+    prefix = os.path.commonprefix(stems).strip("-_—–·. ")
+    if prefix:
+        return prefix
+    return f"{stems[0]} 等{len(stems)}家" if len(stems) > 1 else stems[0]
+
+
 def create_task(
     conn: sqlite3.Connection, project_name: str, files: list[tuple[str, bytes]]
 ) -> int:
     """上传文件落盘 data/uploads/<task_id>/，建 task 行（status='parsing'），返回 task_id。
 
-    每个文件同步预建 quote 占位行（parse_status='pending'，supplier_name 记原文件名），
-    进度接口从任务创建起即可逐文件展示；quote_id 记入 upload 日志供流水线回填。
+    project_name 为空时按文件名自动命名。每个文件同步预建 quote 占位行
+    （parse_status='pending'，supplier_name 记原文件名），进度接口从任务创建起即可逐文件展示；
+    quote_id 记入 upload 日志供流水线回填。
     """
     init_db()
+    project_name = project_name.strip() or _auto_project_name([name for name, _ in files])
     with conn:
         cur = conn.execute(
             "INSERT INTO comparison_task (project_name, status) VALUES (?, 'parsing')",

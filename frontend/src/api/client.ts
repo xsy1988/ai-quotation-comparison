@@ -29,12 +29,8 @@ const baseURL = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8002'
 
 export const http = axios.create({ baseURL, timeout: 30000 })
 
-export async function createTask(
-  files: File[],
-  projectName: string,
-): Promise<CreateTaskResponse> {
+export async function createTask(files: File[]): Promise<CreateTaskResponse> {
   const form = new FormData()
-  form.append('project_name', projectName)
   for (const file of files) {
     form.append('files', file)
   }
