@@ -8,6 +8,7 @@ import json
 import sqlite3
 from typing import Any
 
+from app import prompts
 from app.db import get_connection, init_db
 from app.llm import client as llm_client
 from app.match.atom_match import load_lexicon, make_fingerprint, match_l1
@@ -15,21 +16,6 @@ from app.match.fee_classify import classify_item_type
 from app.persist import CONFIDENCE_MAP, MATCH_PATH_MAP, MODULES, collect_flags
 
 FEE_CLASSIFY_MODULES = ("packaging_transport", "sga_tax")
-
-FALLBACK_ATOM = "AT-QT-001"
-
-_L2_PROMPT = """你是机加工艺原子匹配助手。供应商报价单加工费明细如下，请为每条从候选原子清单中匹配最合适的原子编码。
-
-规则：
-1. 只能使用候选清单中的编码，禁止编造清单外的编码。
-2. 供应商条目若是多个原子工艺的打包报价，返回编码数组；单工艺返回单个编码字符串；完全无法匹配返回 null。
-3. 只输出 JSON：{{"matches": {{"<条目序号>": "<编码>" 或 ["<编码>", ...] 或 null}}}}
-
-候选原子清单（品类 {category}）：
-{candidates}
-
-待匹配条目：
-{items}"""
 
 
 def _load_snapshot(conn: sqlite3.Connection, quote_id: int) -> tuple[dict, str, str | None, str | None]:
@@ -83,13 +69,11 @@ def _l2_llm_match(
         + (f"；备注：{item['note']}" if item.get("note") else "")
         for i, (_idx, item) in enumerate(items)
     )
-    prompt = _L2_PROMPT.format(category=category_code, candidates=cand_lines, items=item_lines)
-    parsed, usage = llm_client.chat_json(
-        [
-            {"role": "system", "content": "你是工艺原子匹配助手，只输出 JSON。"},
-            {"role": "user", "content": prompt},
-        ]
+    messages = prompts.build_messages(
+        "match_atoms",
+        {"category": category_code, "candidates": cand_lines, "items": item_lines},
     )
+    parsed, usage = llm_client.chat_json(messages)
     with conn:
         conn.execute(
             "INSERT INTO parse_log (quote_id, task_id, stage, action, detail, is_llm_call) VALUES (?, ?, 'match', 'l2_llm_match', ?, 1)",
@@ -119,7 +103,7 @@ def _l2_llm_match(
 
 
 def _apply_l2_result(item: dict, value: Any, cand_codes: set[str], stats: dict[str, Any]) -> None:
-    """按 LLM 匹配结果回填条目：唯一命中 / 多编码 bundle / 兜底新工艺三分支。"""
+    """按 LLM 匹配结果回填条目：唯一命中 / 多编码 bundle / 清单外新工艺三分支。"""
     if isinstance(value, str):
         codes = [value]
     elif isinstance(value, list):
@@ -138,18 +122,16 @@ def _apply_l2_result(item: dict, value: Any, cand_codes: set[str], stats: dict[s
         item["bundle_flag"] = True
         item["bundle_members"] = sorted(valid)
         item["bundle_fingerprint"] = make_fingerprint(sorted(valid))
-        item["split_method"] = "estimated"
+        item["split_method"] = "none"  # 打包行不拆金额：整行金额随 bundle 计入合计
         item["confidence"] = "mid"
         item["match_path"] = "llm_semantic"
         stats["l2_matched"] += 1
     else:
-        # LLM 返回 null 或清单外编码：兜底原子 + 新工艺上报
-        item["atom_code"] = FALLBACK_ATOM
+        # LLM 返回 null 或清单外编码：atom_code 留空 + 新工艺上报
+        item["atom_code"] = None
         item["is_new_process"] = True
         item["confidence"] = "low"
         item["match_path"] = "llm_semantic"
-        item["bundle_members"] = [FALLBACK_ATOM]
-        item["bundle_fingerprint"] = make_fingerprint([FALLBACK_ATOM])
         stats["l2_new_process"] += 1
 
 
@@ -189,12 +171,21 @@ def run_mapping(quote_id: int, conn: sqlite3.Connection | None = None) -> dict[s
                     stats["ambiguous"] += 1
                 l2_pending.append((i, item))
 
-        # L2：LLM 语义匹配兜底（品类未知则跳过，留待人工；LLM 不可达/报错上抛，由 pipeline 中止任务）
+        # L2：LLM 语义匹配兜底（品类未知则跳过，留待人工；LLM 不可达/报错上抛，由 pipeline 按单文件失败隔离）
         if category_code and l2_pending:
             matches = _l2_llm_match(conn, quote_id, _quote_task_id(conn, quote_id), category_code, l2_pending)
             cand_codes = {r["code"] for r in _l2_candidates(conn, category_code)}
             for j, (_i, item) in enumerate(l2_pending):
                 _apply_l2_result(item, matches.get(j), cand_codes, stats)
+
+        # L2 已成功匹配（含 bundle）的条目：L1 失败时插入的 unmatched_term 置 resolved；未匹配上的保持 pending
+        resolved_terms = [
+            item.get("name")
+            for _i, item in l2_pending
+            if item.get("match_path") == "llm_semantic"
+            and not item.get("is_new_process")
+            and (item.get("atom_code") or item.get("bundle_flag"))
+        ]
 
         for module in FEE_CLASSIFY_MODULES:
             for item in up[module].get("items") or []:
@@ -202,6 +193,13 @@ def run_mapping(quote_id: int, conn: sqlite3.Connection | None = None) -> dict[s
 
         # 回写 quote_line（按插入序 zip）
         with conn:
+            for term in resolved_terms:
+                conn.execute(
+                    """UPDATE unmatched_term SET status = 'resolved',
+                          updated_at = datetime('now', 'localtime')
+                       WHERE term_text = ? AND status = 'pending'""",
+                    (term,),
+                )
             for module in MODULES:
                 items = up[module].get("items") or []
                 rows = _line_rows(conn, quote_id, module)

@@ -1,6 +1,6 @@
-"""新工艺决策（第 8 步）：扫描兜底新工艺条目 → 建议队列 → 用户决策（新增原子/归并/忽略）。
+"""新工艺决策（第 8 步）：扫描清单外新工艺条目 → 建议队列 → 用户决策（新增原子/归并/忽略）。
 
-- sync_suggestions：按 item_name 聚合任务内 is_new_process=1 且挂兜底原子的加工条目，
+- sync_suggestions：按 item_name 聚合任务内 is_new_process=1 且未挂原子的加工条目，
   upsert new_atom_suggestion（已有非 pending 状态不动，pending 更新计数），幂等；
 - resolve_suggestion：三类决策统一改挂 quote_line（快照按行序 zip 定位同步）、
   别名回流 atom_alias(source='new_process')、flags 重算、建议状态推进。
@@ -14,7 +14,6 @@ import sqlite3
 
 from app.match.atom_match import make_fingerprint
 from app.persist import collect_flags
-from app.pipeline.mapping_runner import FALLBACK_ATOM
 from app.services.correction_service import (
     CorrectionError,
     CorrectionNotFound,
@@ -31,16 +30,16 @@ CODE_RE = re.compile(r"^AT-[A-Z]+-(\d+)$")
 
 
 def sync_suggestions(conn: sqlite3.Connection, task_id: int) -> int:
-    """聚合任务内新工艺兜底条目并 upsert 建议队列，返回 pending 建议数。幂等。"""
+    """聚合任务内新工艺条目并 upsert 建议队列，返回 pending 建议数。幂等。"""
     groups = list(
         conn.execute(
             """SELECT ql.item_name AS item_name, MIN(ql.id) AS line_id, COUNT(*) AS cnt
                FROM quote_line ql
                JOIN quote q ON ql.quote_id = q.id
                WHERE q.task_id = ? AND ql.module = 'processing'
-                 AND ql.is_new_process = 1 AND ql.atom_code = ?
+                 AND ql.is_new_process = 1 AND ql.atom_code IS NULL
                GROUP BY ql.item_name""",
-            (task_id, FALLBACK_ATOM),
+            (task_id,),
         )
     )
     for group in groups:
@@ -133,8 +132,8 @@ def _insert_atom_with_retry(conn: sqlite3.Connection, domain_code: str, payload:
         try:
             with conn:
                 conn.execute(
-                    """INSERT INTO atom (code, name, domain_code, stage_name, class_name, is_fallback)
-                       VALUES (?, ?, ?, ?, ?, 0)""",
+                    """INSERT INTO atom (code, name, domain_code, stage_name, class_name)
+                       VALUES (?, ?, ?, ?, ?)""",
                     (
                         code,
                         payload["name"],
@@ -174,7 +173,7 @@ def _matching_lines(conn: sqlite3.Connection, source_text: str) -> list[sqlite3.
 
 
 def _relink_lines(conn: sqlite3.Connection, lines: list[sqlite3.Row], atom_code: str | None) -> None:
-    """create/merge：改挂新原子；ignore：仅清 is_new_process 保留兜底原子。"""
+    """create/merge：改挂新原子；ignore：仅清 is_new_process，原子保持空。"""
     if atom_code is not None:
         fingerprint = make_fingerprint([atom_code])
         members = json.dumps([atom_code], ensure_ascii=False)

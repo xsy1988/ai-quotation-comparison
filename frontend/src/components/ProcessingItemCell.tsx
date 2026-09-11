@@ -46,7 +46,12 @@ export default function ProcessingItemCell({ item }: Props) {
 
   return (
     <span className="proc-cell" style={{ display: 'block' }}>
-      {editingAmount ? (
+      {item.is_shared ? (
+        // 共享单元格去重置零副本：金额只计一次，置零副本显示"/"，备注见 tooltip
+        <Tooltip title={item.note ?? '与共享单元格金额只计一次'}>
+          <span style={{ color: '#999', cursor: 'help' }}>/</span>
+        </Tooltip>
+      ) : editingAmount ? (
         <InputNumber
           size="small"
           autoFocus
@@ -69,9 +74,11 @@ export default function ProcessingItemCell({ item }: Props) {
         </span>
       )}
       {item.bundle_flag && (
-        <Tag color="blue" style={{ marginLeft: 4 }}>
-          含打包
-        </Tag>
+        <Tooltip title="打包报价未拆分明细，整行金额计入加工费">
+          <Tag color="blue" style={{ marginLeft: 4 }}>
+            含打包
+          </Tag>
+        </Tooltip>
       )}
       {item.is_new_process && <Tag color="purple">新工艺</Tag>}
       {/* 原子映射默认隐藏，hover 单元格出现 icon，点击搜索更换工艺（match_path 将变为 manual） */}

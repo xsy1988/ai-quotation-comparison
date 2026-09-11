@@ -252,6 +252,11 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
             </Tag>
           )}
           {s.supplier_name}
+          {(s.part_name || s.scheme) && (
+            <div style={{ fontSize: 12, fontWeight: 400, color: '#888' }}>
+              {[s.part_name, s.scheme].filter(Boolean).join(' · ')}
+            </div>
+          )}
         </span>
       ),
       key: `q${s.quote_id}`,
@@ -285,6 +290,7 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
             fingerprint: meta.fingerprint ?? null,
             bundle_flag: meta.bundle_flag ?? false,
             is_new_process: meta.is_new_process ?? false,
+            is_shared: meta.is_shared ?? false,
             note: meta.note ?? null,
           }
           return <ProcessingItemCell item={item} />

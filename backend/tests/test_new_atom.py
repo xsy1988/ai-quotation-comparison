@@ -12,7 +12,6 @@ from fastapi.testclient import TestClient
 from app.db import get_connection, init_db
 from app.main import app
 from app.persist import collect_flags, persist_quote
-from app.pipeline.mapping_runner import FALLBACK_ATOM
 from app.services.new_atom_service import list_suggestions, sync_suggestions
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -58,7 +57,7 @@ def _lines(quote_id, item_name=NEW_ITEM):
 
 @pytest.fixture
 def prepared_task(tmp_path, monkeypatch):
-    """灌主数据 + 同一任务下两张报价单，EDM 条目标记为兜底新工艺（DB 与快照一致）。"""
+    """灌主数据 + 同一任务下两张报价单，EDM 条目标记为清单外新工艺（DB 与快照一致）。"""
     import app.persist as persist_module
 
     monkeypatch.setattr(persist_module, "SNAPSHOT_DIR", tmp_path / "snapshots")
@@ -79,30 +78,24 @@ def prepared_task(tmp_path, monkeypatch):
         line = _lines(quote_id)[0]
         with conn:
             conn.execute(
-                """UPDATE quote_line SET atom_code = ?, is_new_process = 1,
+                """UPDATE quote_line SET atom_code = NULL, is_new_process = 1,
                    confidence = 'low', match_path = 'L2_llm',
-                   candidate_atoms = ?, fingerprint = ?
+                   candidate_atoms = NULL, fingerprint = NULL
                    WHERE id = ?""",
-                (
-                    FALLBACK_ATOM,
-                    json.dumps([FALLBACK_ATOM], ensure_ascii=False),
-                    FALLBACK_ATOM,
-                    line["id"],
-                ),
+                (line["id"],),
             )
         snap = _snapshot(quote_id)
         item = next(i for i in snap["unit_price"]["processing"]["items"] if i["name"] == NEW_ITEM)
         item.update(
             {
-                "atom_code": FALLBACK_ATOM,
+                "atom_code": None,
                 "is_new_process": True,
                 "confidence": "low",
                 "match_path": "llm_semantic",
-                "bundle_members": [FALLBACK_ATOM],
-                "bundle_fingerprint": FALLBACK_ATOM,
-                "bundle_flag": False,
             }
         )
+        item.pop("bundle_members", None)
+        item.pop("bundle_fingerprint", None)
         _write_snapshot(quote_id, snap)
         check = conn.execute(
             "SELECT calc_check FROM quote WHERE id = ?", (quote_id,)
@@ -340,7 +333,7 @@ def test_merge_existing_atom(prepared_task):
 
 # ---------- ignore ----------
 
-def test_ignore_keeps_fallback_atom(prepared_task):
+def test_ignore_keeps_atom_unmatched(prepared_task):
     task_id, quote_ids = prepared_task
     sid = _suggestion_id(task_id)
 
@@ -364,14 +357,14 @@ def test_ignore_keeps_fallback_atom(prepared_task):
 
     for quote_id in quote_ids:
         line = _lines(quote_id)[0]
-        assert line["atom_code"] == FALLBACK_ATOM  # 保留兜底原子
+        assert line["atom_code"] is None  # 原子保持空（未匹配）
         assert line["match_path"] == "L2_llm"  # 匹配路径不变
         assert line["is_new_process"] == 0
         item = next(
             i for i in _snapshot(quote_id)["unit_price"]["processing"]["items"]
             if i["name"] == NEW_ITEM
         )
-        assert item["atom_code"] == FALLBACK_ATOM
+        assert item["atom_code"] is None
         assert item["is_new_process"] is False
 
 

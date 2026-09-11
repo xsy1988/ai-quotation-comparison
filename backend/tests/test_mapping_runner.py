@@ -67,12 +67,12 @@ def test_l1_matches_expected_atoms(quote_id):
 
 
 def test_ambiguous_and_unknown_go_to_l2_fallback(quote_id):
-    """L1 未命中（歧义/未知）→ L2 判清单外 → 兜底原子 AT-QT-001 + 新工艺标记。"""
+    """L1 未命中（歧义/未知）→ L2 判清单外 → atom_code 留空 + 新工艺标记。"""
     stats = run_mapping(quote_id)
     lines = _lines(quote_id, "processing")
-    assert lines["EDM"]["atom_code"] == "AT-QT-001"
+    assert lines["EDM"]["atom_code"] is None
     assert lines["EDM"]["match_path"] == "L2_llm"
-    assert lines["激光熔覆"]["atom_code"] == "AT-QT-001"
+    assert lines["激光熔覆"]["atom_code"] is None
     assert lines["激光熔覆"]["match_path"] == "L2_llm"
     assert stats["ambiguous"] == 1  # L1 统计口径不变
     assert stats["unmatched"] == 2
@@ -106,9 +106,9 @@ def test_flags_updated(quote_id):
     conn = get_connection()
     flags = json.loads(conn.execute("SELECT flags FROM quote WHERE id=?", (quote_id,)).fetchone()[0])
     conn.close()
-    assert "new_process" in flags  # L2 兜底后不再有未匹配条目
+    assert "new_process" in flags
     assert "low_confidence" in flags
-    assert "unmatched" not in flags
+    assert "unmatched" in flags  # 清单外新工艺条目 atom_code 为空
 
 
 def test_snapshot_synced(quote_id):
@@ -119,5 +119,5 @@ def test_snapshot_synced(quote_id):
     data = json.loads(open(path, encoding="utf-8").read())
     by_name = {i["name"]: i for i in data["unit_price"]["processing"]["items"]}
     assert by_name["CNC加工"]["atom_code"] == "AT-QX-001"
-    assert by_name["EDM"]["atom_code"] == "AT-QT-001"  # L2 兜底新工艺
+    assert by_name["EDM"]["atom_code"] is None  # L2 判清单外新工艺
     assert by_name["EDM"]["is_new_process"] is True

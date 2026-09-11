@@ -5,11 +5,11 @@
   "category": "CAT-WJWK",
   "expected_atoms": {
     "CNC 加工": "AT-QX-001",
-    "激光咬花": "AT-QT-001",
+    "激光咬花": null,
     "干喷砂": "AT-ZP-005"
   },
   "unmatched_new_process": [
     "激光咬花"
   ],
-  "description": "别名+兜底混合：激光咬花应 L2 兜底，CNC 加工/干喷砂 L1 别名命中"
+  "description": "别名+新工艺混合：激光咬花应 L2 判新工艺（atom_code 留空），CNC 加工/干喷砂 L1 别名命中"
 }

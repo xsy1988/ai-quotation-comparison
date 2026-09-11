@@ -60,10 +60,10 @@ def make_quote(supplier: str, with_inspection: bool, with_extras: bool) -> dict:
             {
                 "name": "等离子抛光",
                 "amount_per_pc": 0.6,
-                "atom_code": "AT-QT-001",
+                "atom_code": None,
                 "is_new_process": True,
                 "bundle_flag": False,
-                "bundle_fingerprint": "AT-QT-001",
+                "bundle_fingerprint": None,
                 "confidence": "low",
                 "match_path": "llm_semantic",
                 "confirm_status": "unconfirmed",
@@ -351,8 +351,8 @@ def test_price_tree_detail_union_and_null(comparison):
     assert alum["meta"][qb]["name"] == "铝材"
     processing = _child(unit, "processing")
     names = {c["label"] for c in processing["children"]}
-    # 标签取原子主数据名称：AT-QT-001 在主数据中叫"其它工艺"
-    assert {"CNC加工", "阳极氧化", "激光熔覆", "其它工艺", "喷砂"} == names
+    # 标签取原子主数据名称；未匹配/清单外条目按原文名称归组
+    assert {"CNC加工", "阳极氧化", "激光熔覆", "等离子抛光", "喷砂"} == names
     laser = _child(processing, "processing::name:激光熔覆")  # 未匹配条目按归一化名称对齐，仅 A 报
     assert laser["values"] == {qa: 0.8, qb: None}
     sand = _child(processing, "processing::atom:AT-ZP-005")  # 仅 B 报
@@ -505,6 +505,37 @@ def test_price_tree_processing_scope_meta(comparison):
     assert cnc["scope_meta"]["class"] == {"code": "后工序", "name": "后工序"}
     laser = _child(processing, "processing::name:激光熔覆")  # 未匹配
     assert laser["scope_meta"] is None
+    # 清单外新工艺（atom_code 空 + is_new_process）同样无 scope_meta，前端分组进"未匹配"组
+    plasma = _child(processing, "processing::name:等离子抛光")
+    assert plasma["scope_meta"] is None
+    conn.close()
+
+
+def test_processing_shared_cell_is_shared_flag(tmp_path, monkeypatch):
+    """共享单元格去重置零副本（note 带共享单元格标记且金额已置 0）→ 行数据带 is_shared，
+    前端金额列显示"/"；金额非 0 的同格式 note（用户改过金额）不误标。"""
+    conn = _seed_master(tmp_path, monkeypatch, "shared")
+    with conn:
+        cur = conn.execute("INSERT INTO comparison_task (project_name, status) VALUES ('t', 'parsed')")
+        task_id = cur.lastrowid
+    quote = make_quote("供应商S", False, False)
+    items = quote["unit_price"]["processing"]["items"]
+    items[0]["amount_per_pc"] = 0.0
+    items[0]["note"] = "与『镭雕』共享单元格 page_1!R4C18，金额只计一次"
+    items[1]["note"] = "与『X』共享单元格 p1!R1，金额只计一次"  # 金额非 0 → 不标记
+    qid = persist_quote(quote, task_id=task_id, file_hash="hshared")["quote_id"]
+    result = get_comparison(conn, task_id)
+
+    details = {d["quote_id"]: d for d in result["processing_details"]}
+    by_name = {i["name"]: i for i in details[qid]["items"]}
+    assert by_name["CNC加工"]["is_shared"] is True
+    assert by_name["阳极氧化"]["is_shared"] is False
+
+    processing = _child(_tree_node(result, "unit_price"), "processing")
+    cnc = _child(processing, "processing::atom:AT-QX-001")
+    assert cnc["meta"][qid]["is_shared"] is True
+    anode = _child(processing, "processing::atom:AT-ZH-013")
+    assert anode["meta"][qid]["is_shared"] is False
     conn.close()
 
 
@@ -579,12 +610,17 @@ def test_drawers_grouping_and_fallback_buckets(comparison):
     assert bucket["values"] == {qa: 2.0, qb: 1.8}
     assert bucket["is_fallback_bucket"] is False
 
+    # 兜底桶只剩"未匹配"：取数口径 atom_code IS NULL（清单外/新工艺条目并入未匹配）
     unmatched = next(g for g in domain_drawer["groups"] if g["group_code"] == "unmatched")
     assert unmatched["is_fallback_bucket"] is True
-    assert unmatched["values"] == {qa: 0.8, qb: None}
-
-    other = next(g for g in domain_drawer["groups"] if g["group_code"] == "other_process")
-    assert other["values"] == {qa: 0.6, qb: None}
+    # A：激光熔覆 0.8 + 等离子抛光 0.6（均 atom_code NULL）
+    assert unmatched["values"] == {qa: 1.4, qb: None}
+    # "其它工艺"兜底原子已移除，不存在专属兜底桶
+    assert all(g["group_code"] != "other_process" for d in result["drawers"] for g in d["groups"])
+    # builtin:domain:QT 的唯一成员曾是已移除的兜底原子 → 该组不下发（避免与未匹配桶重复计数）
+    assert all(
+        g["group_code"] != "builtin:domain:QT" for d in result["drawers"] for g in d["groups"]
+    )
     conn.close()
 
 
@@ -633,6 +669,7 @@ def test_processing_details(comparison):
     assert items_a["CNC加工"]["atom_code"] == "AT-QX-001"
     assert items_a["阳极氧化"]["bundle_flag"] is True
     assert items_a["等离子抛光"]["is_new_process"] is True
+    assert items_a["等离子抛光"]["atom_code"] is None
     assert items_a["激光熔覆"]["atom_code"] is None
     assert len(details[qb]["items"]) == 3
     conn.close()
@@ -641,7 +678,7 @@ def test_processing_details(comparison):
 def test_warnings_line_counts(comparison):
     conn, task_id, qa, qb, result = comparison
     warnings = {w["quote_id"]: w for w in result["warnings"]}
-    assert warnings[qa]["line_counts"] == {"low_confidence": 2, "unmatched": 1, "new_process": 1}
+    assert warnings[qa]["line_counts"] == {"low_confidence": 2, "unmatched": 2, "new_process": 1}
     assert set(warnings[qa]["flags"]) >= {"low_confidence", "unmatched", "new_process"}
     assert warnings[qb]["line_counts"] == {"low_confidence": 0, "unmatched": 0, "new_process": 0}
     conn.close()

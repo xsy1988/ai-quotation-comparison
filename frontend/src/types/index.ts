@@ -5,6 +5,8 @@ export interface Supplier {
   quote_id: number
   supplier_name: string
   supplier_code: string | null
+  part_name: string | null
+  scheme: string | null
   flags: string[]
   calc_check: string | null
   final_unit_price_taxed: number | null
@@ -42,6 +44,8 @@ export interface ProcessingItem {
   fingerprint: string | null
   bundle_flag: boolean
   is_new_process: boolean
+  /** 共享单元格去重的置零副本（derive 规则 A）：金额列显示"/"，备注 tooltip 展示 */
+  is_shared: boolean
   note: string | null
 }
 
@@ -82,6 +86,8 @@ export interface PriceTreeMeta {
   note?: string | null
   /** 该供应商此条目的原文名称（加工费/材料明细同格展示用） */
   name?: string | null
+  /** 共享单元格去重置零副本 → 金额显示"/"（derive 规则 A） */
+  is_shared?: boolean
   cavity_count?: number | null
   lifespan?: number | null
 }
@@ -183,6 +189,10 @@ export interface QuoteProgress {
   supplier_name: string
   parse_status: string
   stage: string | null
+  /** 该 quote 最近一条 parse_log 的 action（如 retry_round），配合 detail 展示重试轮次 */
+  action?: string | null
+  /** 该 quote 最近一条 parse_log 的 detail（JSON）；retry_round 时带 round/reason */
+  detail?: { round?: number; reason?: string } | null
   error?: string | null
 }
 

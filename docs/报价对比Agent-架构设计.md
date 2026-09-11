@@ -66,7 +66,7 @@
  ├─ L1 别名精确匹配（脚本）→ 命中唯一 → confidence=high ✅
  ├─ L2 LLM 语义匹配（约束生成：只能从该品类候选原子子集选编码）
  │    → 多编码 = 打包项（生成组合指纹）
- │    → 判定为清单外工艺 → atom_code=AT-QT-001 其它工艺 + is_new_process=true
+ │    → 判定为清单外工艺 → atom_code=null + is_new_process=true
  └─ L3 完全无法判断 → atom_code=null, confidence=low
     ★ 任何级别金额都保留落库，匹配失败损失的只是对比粒度
 ```
@@ -88,7 +88,7 @@
 | `process_domain` 工艺域 | 域码、名称 | v2 清单 | 34（含"其他"） |
 | `process_stage` 工艺阶段 | 名称 | v2 清单 | 12（含"其他"） |
 | `process_class` 工艺类别 | 名称 | v2 清单 | 3 |
-| `atom` 原子工艺 | **原子编码(PK)**、名称、域/阶段/类别FK、备注、is_fallback | v2 清单（含 AT-QT-001 兜底原子，is_fallback=true） | 453 |
+| `atom` 原子工艺 | **原子编码(PK)**、名称、域/阶段/类别FK、备注 | v4 清单（原 AT-QT-001 兜底原子已删除） | 452 |
 | `atom_alias` 原子别名 ⭐ | 别名文本、原子FK、来源（初始导入/人工回流/新工艺决策）、命中次数 | 别名列拆分 + 持续回流 | 904（初始全量）+ 持续回流增长 |
 | `atom_category` 原子-品类 | 原子FK、品类FK | "常用品类"列拆分 | ~787 |
 | `dim_group` 对比抽屉 | group_code、名称、parent_code（多层级）、member_atoms、scope、is_builtin | 内置三维初始化 + 用户自建 | N |
@@ -130,12 +130,12 @@
 
 ```
 L2/L3 中 LLM 判定"清单外工艺"
-  → 条目 atom_code=AT-QT-001, is_new_process=true
+  → 条目 atom_code=null, is_new_process=true
   → 写入 new_atom_suggestion 队列（含 LLM 建议的名称/域/阶段归属）
   → 前端比价界面弹出决策卡片："发现新工艺『XX』，出现 2 次"
      ├─ [新增原子] → atom 表追加（域内顺序取新编码）+ 别名自动收录 + 条目改挂新编码
      ├─ [归并现有] → 用户选择现有原子 → 原文写入 atom_alias（来源=人工回流）
-     └─ [忽略]     → 保留 AT-QT-001 挂接，不再提示本次任务
+     └─ [忽略]     → 条目保持未匹配，不再提示本次任务
 所有人工修正（改选原子/改金额）同步触发别名回流
 ```
 
@@ -169,12 +169,12 @@ GET|POST|PATCH|DELETE /api/master/{atoms|aliases|categories|dim_groups|suppliers
 
 | # | 模块 | 职责 | 类型 |
 |---|---|---|---|
-| 1 | `import_master_data.py` | v2 清单 → 主数据表（含别名拆分、AT-QT-001、内置三维抽屉初始化） | 一次性+更新重跑 |
+| 1 | `import_master_data.py` | v2 清单 → 主数据表（含别名拆分、内置三维抽屉初始化；过滤已废弃的 AT-QT-001） | 一次性+更新重跑 |
 | 2 | `ingest.py` | 文件接入：**哈希查重（已解析则复用结果，前置门禁）**、格式识别→IR、归档 | 流水线段 |
 | 3 | `layout_understand.py` | LLM 版面理解并直接产出字段值（含金额）+ **品类自动判定**；脚本独立交叉验证，不一致双值保留打标（边界实测可调） | 流水线段（混合） |
 | 4 | `normalize.py` | 数字/日期/币种规范化 | 流水线段 |
 | 5 | `fee_classify.py` | 非加工费类型映射（同义词表+规则） | 流水线段 |
-| 6 | `atom_match.py` | 三级原子匹配 + 打包指纹 + 新工艺识别（AT-QT-001/is_new_process） | 流水线段（混合） |
+| 6 | `atom_match.py` | 三级原子匹配 + 打包指纹 + 新工艺识别（is_new_process） | 流水线段（混合） |
 | 7 | `validate.py` | Schema/枚举/勾稽（含模块 total ≥ Σitems 规则）/交叉验证异常/异常值校验（只打标不阻断） | 流水线段 |
 | 8 | `persist.py` | JSON 快照存档 + 派生落库（含模块合计列） | 流水线段 |
 | 9 | `compare_engine.py` | 机械对比：层级金额对比 + 抽屉汇总 + 指纹对齐 | 纯脚本 |
@@ -188,7 +188,7 @@ GET|POST|PATCH|DELETE /api/master/{atoms|aliases|categories|dim_groups|suppliers
 ## 十、实施顺序建议
 
 ```
-第1步  建库 + import_master_data（含兜底原子与内置抽屉初始化）
+第1步  建库 + import_master_data（含内置抽屉初始化）
 第2步  ingest + normalize（先 Excel）+ persist       → 骨架可跑
 第3步  atom_match L1 + fee_classify                  → 规整报价单自动出结果
 第4步  compare_engine + 后端 API + 比价界面（最小版）  → 第一个可用闭环 ★

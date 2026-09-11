@@ -13,6 +13,7 @@ import json
 import sqlite3
 
 from app.match.atom_match import make_fingerprint
+from app.derive import derive_offer
 from app.persist import (
     MODULES,
     calc_check,
@@ -86,11 +87,15 @@ def _snapshot_item(
 
 
 def _sync_quote_derived(conn: sqlite3.Connection, quote_id: int, data: dict) -> None:
-    """改金额/模块合计后重推导：回写快照 summary、quote 汇总列与模块 total 列，
+    """改金额/模块合计后重推导：复用 derive 的确定性规则（共享单元格去重、模块 total 补缺、
+    税费按税率派生、summary 重算并归档 LLM 原值）；未税总额按修正后模块 total 重算
+    （人工修正的是 total，以 total 为准），最终单价按 taxed−discount 回写，
     重算 calc_check 与 flags。"""
+    derive_offer(data)
     up = data["unit_price"]
     module_totals = {name: module_total(up[name]) for name in MODULES}
-    tax = round(
+    summary = up["summary"]
+    tax_items_sum = round(
         sum(
             item.get("amount_per_pc") or 0
             for item in up["sga_tax"].get("items") or []
@@ -101,14 +106,13 @@ def _sync_quote_derived(conn: sqlite3.Connection, quote_id: int, data: dict) -> 
     untaxed = round(
         sum(v or 0 for k, v in module_totals.items() if k != "sga_tax")
         + (module_totals["sga_tax"] or 0)
-        - tax,
+        - tax_items_sum,
         6,
     )
+    tax = summary["tax_amount"] if summary["tax_amount"] is not None else tax_items_sum
     taxed = round(untaxed + tax, 6)
-    discount = up["summary"].get("discount") or 0
+    discount = summary.get("discount") or 0
     final = round(taxed - discount, 6)
-
-    summary = up["summary"]
     summary["untaxed_total"] = untaxed
     summary["tax_amount"] = tax
     summary["taxed_total"] = taxed

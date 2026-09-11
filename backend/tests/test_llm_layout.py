@@ -10,10 +10,11 @@ import pytest
 
 from app.db import get_connection, init_db
 from app.ingest import excel_to_ir, sha256_of
-from app.llm.client import LLMUnavailable
+from app.llm.client import LLMError, LLMUnavailable
 import app.persist as persist_module
 from app.persist import persist_quote
 from app.pipeline.layout_understand import (
+    LLMValidateError,
     cross_check,
     parse_ir_with_llm,
     parse_ir_with_llm_traced,
@@ -44,32 +45,41 @@ class FakeChat:
         return resp, {"model": "fake", "total_tokens": 100, "elapsed_ms": 5}
 
 
-def valid_quote(category="CAT-WJWK") -> dict:
+def valid_offer(category="CAT-WJWK") -> dict:
     data = rule_parse_ir(load_ir())
     data["basic"]["category"] = category
     return data
 
 
+def envelope(*offers) -> dict:
+    return {"offers": list(offers)}
+
+
+def valid_quote(category="CAT-WJWK") -> dict:
+    """信封格式的合法 LLM 输出。"""
+    return envelope(valid_offer(category))
+
+
 def invalid_quote() -> dict:
     """currency 违反枚举，必触发 Draft7 校验错误。"""
-    data = valid_quote()
+    data = valid_offer()
     data["basic"]["currency"] = "RMB"
-    return data
+    return envelope(data)
 
 
 def test_parse_llm_normal_and_category():
     fake = FakeChat(valid_quote())
     data, attempts, cross = parse_ir_with_llm_traced(load_ir(), chat_fn=fake)
-    validate_quote(data)  # LLM 输出本身过 Draft7
-    assert data["basic"]["category"] == "CAT-WJWK"
+    validate_quote(data["offers"][0])  # LLM 输出本身过 Draft7（单 offer）
+    assert data["offers"][0]["basic"]["category"] == "CAT-WJWK"
     assert attempts[0]["validation_errors"] is None
     assert cross["item_conflicts"] == 0
     # 品类清单进了 prompt
     prompt = fake.calls[0][-1]["content"]
     for code in ("CAT-WJWK", "CAT-PCBA", "CAT-BC"):
         assert code in prompt
-    # processing 映射阶段字段的规约
-    assert '"low"' in prompt and "match_path" in prompt
+    # 信封结构与 processing 映射阶段字段的规约
+    assert '"offers"' in prompt and '"low"' in prompt and "match_path" in prompt
 
 
 def test_parse_llm_schema_retry_once_then_success():
@@ -81,17 +91,47 @@ def test_parse_llm_schema_retry_once_then_success():
     # 第二轮对话里带上了校验错误反馈
     retry_text = fake.calls[1][-1]["content"]
     assert "currency" in retry_text
-    assert data["basic"]["currency"] == "CNY"
+    assert data["offers"][0]["basic"]["currency"] == "CNY"
+
+
+def test_self_check_archived_to_derived():
+    """带 _self_check 的 LLM 输出：schema 校验通过，_self_check 摘下入档 _derived.llm_self_check。"""
+    quote = valid_quote()
+    self_check = {
+        "amounts_traceable": True,
+        "no_invented_values": True,
+        "null_fields": ["unit_price.sga_tax.items[3].amount_per_pc"],
+        "uncertain_cells": [{"location": "page_1!R4C22", "reason": "税率13%只有费率，税额缺失"}],
+    }
+    quote["offers"][0]["_self_check"] = self_check
+    fake = FakeChat(quote)
+    data, attempts, _cross = parse_ir_with_llm_traced(load_ir(), chat_fn=fake)
+    offer = data["offers"][0]
+    assert "_self_check" not in offer  # 已从 offer 顶层摘除，不进 schema 校验
+    assert offer["_derived"]["llm_self_check"] == self_check
+    validate_quote(offer)  # schema 校验不受 _derived 附加字段影响
+    assert attempts[0]["prompt_version"]  # attempts 带 prompt 版本号
+    assert "v" in attempts[0]["prompt_version"]
+    # prompt 契约要求 LLM 输出 _self_check
+    assert "_self_check" in fake.calls[0][-1]["content"]
+
+
+def test_self_check_absent_archived_null():
+    """LLM 未输出 _self_check 不报错，存档 null。"""
+    fake = FakeChat(valid_quote())
+    data, attempts, _cross = parse_ir_with_llm_traced(load_ir(), chat_fn=fake)
+    assert data["offers"][0]["_derived"]["llm_self_check"] is None
+    assert attempts[0]["prompt_version"]
 
 
 def test_parse_llm_persistent_invalid_raises_unavailable():
-    fake = FakeChat(invalid_quote(), invalid_quote())
+    fake = FakeChat(invalid_quote(), invalid_quote(), invalid_quote())
     with pytest.raises(LLMUnavailable) as exc_info:
         parse_ir_with_llm(load_ir(), chat_fn=fake)
-    assert len(fake.calls) == 2  # 只重试 1 次
+    assert len(fake.calls) == 3  # 上限 3 轮（含首轮）
     attempts = exc_info.value.attempts
-    assert len(attempts) == 2
-    assert attempts[1]["validation_errors"]
+    assert len(attempts) == 3
+    assert attempts[2]["validation_errors"]
 
 
 def test_parse_llm_gateway_unavailable_no_retry():
@@ -101,17 +141,96 @@ def test_parse_llm_gateway_unavailable_no_retry():
     assert len(fake.calls) == 1  # 网关类错误立即上抛，不烧重试
 
 
+# ---------------------------------------------------------------------------
+# 3 轮重试闭环：L1 溯源反馈（traceability）、L2 只记录不打断
+# ---------------------------------------------------------------------------
+
+def _hallucinated_amount_quote() -> dict:
+    """金额被改成 raw_text 中不存在的值（schema 合法的内容幻觉）。"""
+    quote = valid_quote()
+    quote["offers"][0]["unit_price"]["processing"]["items"][0]["amount_per_pc"] = 9.99  # 原文 'CNC加工 2'
+    return quote
+
+
+def test_parse_llm_l1_hallucination_retry_then_success():
+    """第 1 轮幻觉金额 → L1 报 amount_not_in_evidence 并按 traceability 反馈 → 第 2 轮修正成功。"""
+    fake = FakeChat(_hallucinated_amount_quote(), valid_quote())
+    data, attempts, _cross = parse_ir_with_llm_traced(load_ir(), chat_fn=fake)
+    assert len(fake.calls) == 2
+    assert attempts[0]["l1_issues"]  # 第一轮 L1 问题入档
+    assert attempts[0]["l1_issues"][0]["issue"] == "amount_not_in_evidence"
+    assert attempts[1]["l1_issues"] is None
+    # 第二轮对话带上了 traceability 反馈（按 path 逐条列出问题）
+    retry_text = fake.calls[1][-1]["content"]
+    assert "amount_not_in_evidence" in retry_text
+    assert "_self_check.null_fields" in retry_text
+    assert "9.99" in retry_text
+    assert data["offers"][0]["unit_price"]["processing"]["items"][0]["amount_per_pc"] == 2.0
+
+
+def test_parse_llm_l1_persistent_hallucination_raises_after_3_rounds():
+    """3 轮都不改幻觉金额 → LLMValidateError，attempts 长度 3，异常带最终问题清单。"""
+    fake = FakeChat(_hallucinated_amount_quote(), _hallucinated_amount_quote(), _hallucinated_amount_quote())
+    with pytest.raises(LLMValidateError) as exc_info:
+        parse_ir_with_llm(load_ir(), chat_fn=fake)
+    assert len(fake.calls) == 3
+    attempts = exc_info.value.attempts
+    assert len(attempts) == 3
+    assert all(a["l1_issues"] for a in attempts)  # 每轮 L1 都报同一幻觉
+    assert "9.99" in str(exc_info.value)  # 异常消息带最终问题清单
+
+
+def test_parse_llm_json_unparseable_retries_up_to_3():
+    """JSON 解析失败路径保持原有行为，上限变为 3 轮。"""
+    fake = FakeChat(LLMError("bad json"), LLMError("bad json"), LLMError("bad json"))
+    with pytest.raises(LLMUnavailable) as exc_info:
+        parse_ir_with_llm(load_ir(), chat_fn=fake)
+    assert len(fake.calls) == 3
+    assert len(exc_info.value.attempts) == 3
+    assert all(a["validation_errors"] == ["bad json"] for a in exc_info.value.attempts)
+    # 每轮反馈均为 json_unparseable 模板
+    for call in fake.calls[1:]:
+        assert "上次输出有误" in call[-1]["content"]
+
+
+def test_parse_llm_l2_issues_recorded_not_blocking():
+    """summary 不闭合属勾稽问题（blame=B）：只写入 attempts 末条 l2_issues，不打断返回。"""
+    quote = valid_quote()
+    quote["offers"][0]["unit_price"]["summary"]["untaxed_total"] = 999.0  # 与重算值 10.0 不符
+    fake = FakeChat(quote)
+    data, attempts, _cross = parse_ir_with_llm_traced(load_ir(), chat_fn=fake)
+    assert data["offers"][0]["unit_price"]["summary"]["untaxed_total"] == 999.0
+    assert len(attempts) == 1  # 一轮通过，L2 不触发重试
+    l2_issues = attempts[-1]["l2_issues"]
+    assert l2_issues
+    assert any(i["issue"] == "summary_not_closed" for i in l2_issues)
+    assert all(i["blame"] == "B" for i in l2_issues)
+    assert attempts[-1]["validation_errors"] is None
+    assert attempts[-1]["l1_issues"] is None
+
+
 def test_cross_check_clean_on_sample():
-    data = valid_quote()
+    data = valid_offer()  # 旧格式单 quote：兼容路径
     result = cross_check(load_ir(), data)
     assert result["item_conflicts"] == 0
     assert result["total_conflicts"] == []
     assert all("_cross_check" not in i for i in data["unit_price"]["processing"]["items"])
 
 
+def test_cross_check_envelope_multi_offers():
+    """信封多 offer：条目级对账逐 offer 覆盖，模块合计按各 offer 行 scope 对账不误报。"""
+    offer_a = valid_offer()
+    offer_b = valid_offer()
+    offer_b["basic"]["scheme"] = "方案2"
+    data = envelope(offer_a, offer_b)
+    result = cross_check(load_ir(), data)
+    assert result["item_conflicts"] == 0
+    assert result["total_conflicts"] == []
+
+
 def test_cross_check_conflict_written_and_persisted(tmp_path, monkeypatch):
     monkeypatch.setattr(persist_module, "SNAPSHOT_DIR", tmp_path / "snapshots")
-    data = valid_quote(category=None)  # 本测试未灌主数据，category 有 FK 约束
+    data = valid_offer(category=None)  # 本测试未灌主数据，category 有 FK 约束
     tampered = data["unit_price"]["processing"]["items"][0]
     tampered["amount_per_pc"] = 9.99  # 原文行金额为 2.0
 
@@ -132,7 +251,7 @@ def test_cross_check_conflict_written_and_persisted(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# pipeline 编排：LLM 优先；LLM 故障中止任务（不降级）
+# pipeline 编排：LLM 优先；LLM 故障按单文件失败隔离（不再中止任务）
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -163,12 +282,12 @@ def _upload_and_run(conn, tmp_path):
     return run_task(task_id, conn)
 
 
-def test_pipeline_llm_unavailable_aborts_task(prepared):
+def test_pipeline_llm_unavailable_marks_file_failed(prepared):
+    """LLM 故障改为单文件级隔离：唯一文件失败 → 该文件 failed、任务 failed（全败才 failed）。"""
     conn, tmp_path = prepared
-    summary = _upload_and_run(conn, tmp_path)  # conftest 禁真实网关 → 任务中止
+    summary = _upload_and_run(conn, tmp_path)  # conftest 禁真实网关 → 该文件标失败
     assert summary["task_status"] == "failed"
     assert summary["results"][0]["status"] == "failed"
-    assert "LLM" in summary["error"]
 
     task = conn.execute("SELECT status FROM comparison_task WHERE id = ?", (summary["task_id"],)).fetchone()
     assert task["status"] == "failed"
@@ -202,5 +321,6 @@ def test_pipeline_llm_success_path(prepared, monkeypatch):
     quote = conn.execute("SELECT category_code, calc_check, flags FROM quote").fetchone()
     assert quote["category_code"] == "CAT-WJWK"  # LLM 品类判定落库
     assert quote["calc_check"] == "pass"
-    assert "cross_validation_conflict" not in json.loads(quote["flags"])
+    # 样例报价单税额 0.51 与 13%×未税(1.30) 不符：单据值保留，derive 打标（新规则，单据优先不改值）
+    assert json.loads(quote["flags"]) == ["cross_validation_conflict"]
     conn.close()

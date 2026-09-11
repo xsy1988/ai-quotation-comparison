@@ -27,6 +27,28 @@ def load_schema() -> dict:
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
+@lru_cache(maxsize=1)
+def load_envelope_schema() -> dict:
+    """信封 schema：{"offers": [单 offer schema...]}。单文件多产品/多方案时 LLM 的输出结构，
+    由单 offer schema 程序化包装，避免维护两份 280 行定义。
+    definitions 提升到信封根部：offer 内的 $ref '#/definitions/...' 以信封文档为根解析。"""
+    offer = load_schema()
+    return {
+        "type": "object",
+        "required": ["offers"],
+        "properties": {
+            "offers": {"type": "array", "minItems": 1, "items": offer}
+        },
+        "definitions": offer.get("definitions", {}),
+    }
+
+
+def iter_offers(data: dict) -> list[dict]:
+    """从 LLM 输出取 offers 列表；兼容旧格式（无信封层的单个 quote 对象）。"""
+    offers = data.get("offers")
+    return offers if isinstance(offers, list) and offers else [data]
+
+
 def validate_quote(data: dict, schema: dict | None = None) -> None:
     schema = schema or load_schema()
     validator = Draft7Validator(schema)

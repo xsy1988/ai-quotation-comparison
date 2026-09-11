@@ -40,7 +40,7 @@ def test_expected_file_wellformed(expected_path):
     }
     assert data["calc_check"] in ("pass", "fail")
     assert data["category"].startswith("CAT-")
-    assert all(code.startswith("AT-") for code in data["expected_atoms"].values())
+    assert all(code is None or code.startswith("AT-") for code in data["expected_atoms"].values())
     assert set(data["unmatched_new_process"]) <= set(data["expected_atoms"])
 
 
@@ -89,3 +89,46 @@ def test_eval_replay_loads_expected():
     for path in sorted(CORPUS_DIR.glob("*.expected.json")):
         expected = eval_replay._load_expected(path)
         assert expected["supplier_name"]
+
+
+GOLD_MANIFEST = CORPUS_DIR / "gold_derive_cases.json"
+GOLD_KEYS = {
+    "untaxed_total", "tax_amount", "taxed_total", "final_unit_price_taxed",
+    "processing_total",
+}
+GOLD_OPTIONAL_KEYS = {
+    "kept_item_amounts",  # keeper 条目金额断言（{"module.name": 金额}）
+    "item_amounts",       # 构成级逐项断言（{"module.name": 金额}，科目必须存在且金额相等）
+    "absent_items",       # 负断言（["module.name", ...]，碎片/错挂科目不应出现）
+}
+
+
+def test_gold_derive_manifest_wellformed():
+    """金标 derive 清单：字段齐全、引用的信封/IR fixture 存在且可被 eval_replay 重放通过。"""
+    manifest = json.loads(GOLD_MANIFEST.read_text(encoding="utf-8"))
+    assert manifest["cases"], "金标清单至少 1 个案例"
+    for case in manifest["cases"]:
+        assert case["name"]
+        assert (CORPUS_DIR / case["envelope"]).resolve().exists()
+        assert (CORPUS_DIR / case["ir"]).resolve().exists()
+        assert case["expected_offers"]
+        for exp in case["expected_offers"]:
+            assert GOLD_KEYS <= set(exp) <= GOLD_KEYS | GOLD_OPTIONAL_KEYS
+            assert all(isinstance(exp[k], (int, float)) for k in GOLD_KEYS)
+            for key in ("kept_item_amounts", "item_amounts"):
+                for ref, amount in (exp.get(key) or {}).items():
+                    assert "." in ref and isinstance(amount, (int, float))
+            for ref in (exp.get("absent_items") or []):
+                assert "." in ref
+
+
+def test_eval_replay_runs_gold_derive_cases():
+    """eval_replay 重放金标 derive 案例（确定性，无 LLM）：必须全部通过。"""
+    sys.path.insert(0, str(BACKEND_DIR / "scripts"))
+    try:
+        import eval_replay
+    finally:
+        sys.path.remove(str(BACKEND_DIR / "scripts"))
+    hit, total, failures = eval_replay._run_gold_derive_cases(CORPUS_DIR)
+    assert total >= 1, "金标清单未登记任何案例"
+    assert hit == total, f"金标劣化：{failures}"

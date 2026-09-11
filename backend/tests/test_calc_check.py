@@ -85,6 +85,6 @@ def test_collect_flags_low_confidence_and_unmatched():
 def test_collect_flags_new_process():
     data = make_quote()
     item = copy.deepcopy(data["unit_price"]["processing"]["items"][0])
-    item.update({"name": "新工艺", "atom_code": "AT-QT-001", "is_new_process": True})
+    item.update({"name": "新工艺", "atom_code": None, "is_new_process": True})
     data["unit_price"]["processing"]["items"].append(item)
     assert "new_process" in collect_flags(data, "pass")

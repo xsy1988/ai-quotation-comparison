@@ -1,4 +1,3 @@
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -6,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api import corrections_router, master_router, suggestions_router, tasks_router
+from .config import settings
 from .db import init_db
 
 
@@ -39,6 +39,4 @@ def health() -> dict[str, str]:
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.environ.get("PORT", "8000"))
-    host = os.environ.get("HOST", "127.0.0.1")
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=settings.host, port=settings.port)

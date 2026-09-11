@@ -1,8 +1,14 @@
-"""任务编排：上传文件落盘 → 建任务 → 逐文件跑 查重→接入→解析→校验→落库→映射。
+"""任务编排：上传文件落盘 → 建任务 → 逐文件跑 查重→接入→解析→派生→校验→落库→映射。
 
-单文件失败不拖垮整任务：该 quote 标 failed 并写 parse_log，全部结束后 task.status='parsed'。
-LLM 故障例外：网关不可用/报错时不降级，标记失败、task.status='failed' 并中止剩余文件。
-ingest/persist 自建连接提交；本模块的日志/状态更新走传入 conn 的短事务，避免跨连接写锁竞争。
+文件级并发：run_task 用 ThreadPoolExecutor（max_workers=PARSE_CONCURRENCY）并发处理各文件，
+每个 worker 线程在 _process_one 内自建 sqlite 连接（finally 关闭），不跨线程共享连接
+（sqlite3 默认 check_same_thread=True）；主线程连接只用于读任务/上传清单与写终态。
+并发写锁由 WAL + busy_timeout 兜底（db.get_connection）。
+
+单文件失败不拖垮整任务：该 quote 标 failed 并写 parse_log，继续剩余文件；LLM 故障
+（网关不可用/解析失败）按同等级隔离处理，不中止任务。全部结束后：任一文件成功
+task.status='parsed'，全部失败 'failed'。
+ingest/persist 自建连接提交；本模块的日志/状态更新走所在线程连接的短事务，避免跨连接写锁竞争。
 """
 
 import json
@@ -10,22 +16,25 @@ import os
 import re
 import sqlite3
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from app.config import settings
 from app.db import get_connection, init_db
+from app.derive import derive_offer
 from app.ingest import ParseError as IngestParseError
 from app.ingest import ingest_file
 from app.ir import IR
 from app.llm.client import LLMError
-from app.persist import find_quote_by_hash, persist_quote
+from app.persist import load_envelope, persist_quote, save_envelope
 from app.pipeline.layout_understand import parse_ir_with_llm_traced
 from app.pipeline.mapping_runner import run_mapping
 from app.pipeline.simple_excel_parse import ParseError
+from app.pipeline.verify_runner import run_verify_shadow
 from app.validate.validate import ValidateError, validate_quote_full
+from app.validate.validators import validate_l2_reconcile
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"
-
-FINAL_TASK_STATUS = "parsed"
 
 
 def _auto_project_name(filenames: list[str]) -> str:
@@ -123,6 +132,46 @@ def _mark_failed(
     return quote_id
 
 
+def _verify_enabled() -> bool:
+    """LLM-B 影子复核开关：配置项 LLM_B_VERIFY，默认开，"0" 关闭。"""
+    return settings.llm_b_verify
+
+
+def _run_verify_shadow_all(
+    conn: sqlite3.Connection,
+    task_id: int,
+    offers: list[dict],
+    ir,
+    quote_id: int | None = None,
+    chat_fn=None,
+) -> None:
+    """逐 offer 跑 LLM-B 影子复核并写 parse_log（stage="verify", action="shadow"）。
+
+    与脚本侧 L2 勾稽问题（blame=B，derive 修正后口径）并排记录，积累"脚本 vs LLM-B"
+    判例；verify 自身承诺不抛异常，这里再套一层防御，保证单文件异常隔离不破。
+    """
+    for i, offer in enumerate(offers):
+        try:
+            result = run_verify_shadow(offer, ir, conn=conn, chat_fn=chat_fn)
+        except Exception as e:  # 防御：影子模式绝不拖垮流水线
+            result = {"verdict": "skipped", "reason": f"unexpected {type(e).__name__}: {e}"}
+        if result is None:
+            continue
+        usage = result.get("usage") or {}
+        blame_b = validate_l2_reconcile({"offers": [offer]})
+        _log(
+            conn, task_id, "verify", "shadow",
+            {
+                "quote_offer_index": i,
+                "blame_b_issues": [issue.to_dict() for issue in blame_b],
+                "llm_b": result,
+                "model": usage.get("model"),
+                "elapsed_ms": usage.get("elapsed_ms"),
+            },
+            quote_id,
+        )
+
+
 def _process_file(
     conn: sqlite3.Connection, task_id: int, project_name: str, path: Path, quote_id: int | None = None
 ) -> dict:
@@ -131,47 +180,108 @@ def _process_file(
     file_hash = ingest_result["sha256"]
     _log(conn, task_id, "dedup", ingest_result["status"], ingest_result, quote_id)
 
-    # 同 hash 已有 quote：复用历史解析结果（快照重新派生落库，不重复解析/映射）
-    existing_quote_id = find_quote_by_hash(conn, file_hash)
-    if existing_quote_id is not None:
-        row = conn.execute("SELECT raw_json_path FROM quote WHERE id = ?", (existing_quote_id,)).fetchone()
-        data = json.loads(Path(row["raw_json_path"]).read_text(encoding="utf-8"))
-        result = persist_quote(
-            data, project_name=project_name, task_id=task_id, file_hash=file_hash, quote_id=quote_id
-        )
+    # 同 hash 已有信封存档：复用历史解析结果（不重复 LLM 解析/校验），
+    # 但映射结果不存信封（映射依赖库内原子主数据，会随主数据更新变化），故仍需逐 offer 重新映射；
+    # 派生重算同样不能省：信封是 derive 之前的原始 LLM 输出（total 可能是 LLM 算错的值），
+    # 不带 IR 的保守重算会保留这个错值，必须带 IR 复算（与正常路径同一口径）
+    envelope = load_envelope(file_hash)
+    if envelope is not None:
+        ir = IR.from_dict(json.loads(Path(ingest_result["ir_path"]).read_text(encoding="utf-8")))
+        offers = envelope.get("offers") or []
+        for offer in offers:
+            derive_offer(offer, ir=ir)
+        quote_ids: list[int] = []
+        for i, offer in enumerate(offers):
+            result = persist_quote(
+                offer, project_name=project_name, task_id=task_id, file_hash=file_hash,
+                quote_id=quote_id if i == 0 else None,
+            )
+            quote_ids.append(result["quote_id"])
         _log(
             conn, task_id, "dedup", "quote_reused",
-            {"reused_from": existing_quote_id}, quote_id or result["quote_id"],
+            {"reused_from_hash": file_hash, "offers": len(offers)}, quote_ids[0] if quote_ids else quote_id,
         )
-        return {"quote_id": result["quote_id"], "status": "reused", "calc_check": result["calc_check"]}
+        stats = _map_quotes(conn, task_id, quote_ids, quote_id)
+        return {
+            "quote_ids": quote_ids, "quote_id": quote_ids[0] if quote_ids else quote_id,
+            "status": "reused", "calc_check": result["calc_check"], "offers": len(offers),
+        }
 
-    # ② 版面解析：LLM 版面理解。网关不可用/报错直接抛 LLMError，由 run_task 中止任务（不降级）
+    # ② 版面解析：LLM 版面理解。网关不可用/报错抛 LLMError，由 _process_one 按单文件失败隔离（继续剩余文件）
     ir = IR.from_dict(json.loads(Path(ingest_result["ir_path"]).read_text(encoding="utf-8")))
-    data, llm_attempts, cross = parse_ir_with_llm_traced(ir, conn=conn)
+    # 进度事件：LLM 解析耗时长（40s×N 轮），进入即写 layout/started，每轮重试写 layout/retry_round，
+    # 否则前端进度在"接入"节点长时间无动静
+    _log(conn, task_id, "layout", "started", {"file": path.name, "rows": len(ir.tables)}, quote_id)
+
+    def _on_layout_retry(info: dict) -> None:
+        _log(conn, task_id, "layout", "retry_round", info, quote_id)
+
+    envelope, llm_attempts, cross = parse_ir_with_llm_traced(ir, conn=conn, progress_cb=_on_layout_retry)
+    offers = envelope.get("offers") or []
+    save_envelope(file_hash, envelope)
     _log(
         conn, task_id, "layout", "parsed",
-        {"rows": len(ir.tables), "supplier": data["supplier"]["supplier_name"],
+        {"rows": len(ir.tables), "offers": len(offers),
+         "supplier": offers[0]["supplier"]["supplier_name"] if offers else None,
          "engine": "llm", "llm_attempts": llm_attempts},
         quote_id,
     )
     _log(conn, task_id, "layout", "cross_check", cross, quote_id)
 
-    # ④ 校验（schema + 勾稽 + 枚举）
-    check, flags = validate_quote_full(conn, data)
-    _log(conn, task_id, "validate", check, {"flags": flags}, quote_id)
+    # ③ 派生重算（脚本确定性规则修正 LLM 算术：共享单元格去重/模块 total/税费/summary），
+    # 幂等，persist 落库前会再跑一次（保守路径，不带 IR）
+    for offer in offers:
+        derive_offer(offer, ir=ir)
 
-    # ⑤ 落库（persist 自建连接提交；回填本文件占位行）
-    result = persist_quote(data, project_name=project_name, task_id=task_id, file_hash=file_hash, quote_id=quote_id)
-    qid = quote_id or result["quote_id"]
+    # ③½ LLM-B 核算复核（影子模式，只记录不生效）：derive 之后、validate 之前；
+    # LLM_B_VERIFY=0 时跳过
+    if _verify_enabled():
+        _log(conn, task_id, "verify", "started", {"offers": len(offers)}, quote_id)
+        _run_verify_shadow_all(conn, task_id, offers, ir, quote_id)
+
+    # ④ 校验（schema + 勾稽 + 枚举），逐 offer 独立校验
+    checks: list[str] = []
+    all_flags: list[str] = []
+    for offer in offers:
+        check, flags = validate_quote_full(conn, offer)
+        checks.append(check)
+        all_flags.extend(flags)
+    _log(conn, task_id, "validate", "/".join(checks) or "unchecked", {"flags": all_flags}, quote_id)
+
+    # ⑤ 落库（persist 自建连接提交；第 1 个 offer 回填本文件占位行，其余新增 quote 行）
+    quote_ids = []
+    calc_check = checks[0] if checks else "unchecked"
+    flags: list[str] = []
+    for i, offer in enumerate(offers):
+        result = persist_quote(
+            offer, project_name=project_name, task_id=task_id, file_hash=file_hash,
+            quote_id=quote_id if i == 0 else None,
+        )
+        quote_ids.append(result["quote_id"])
+        calc_check = result["calc_check"]
+        flags = result["flags"]
+    qid = quote_ids[0] if quote_ids else quote_id
     _log(
         conn, task_id, "persist", "stored",
-        {"quote_id": qid, "calc_check": check, "flags": flags}, qid,
+        {"quote_ids": quote_ids, "calc_check": calc_check, "flags": flags}, qid,
     )
 
-    # ③ 语义映射
-    stats = run_mapping(qid, conn)
+    # ③ 语义映射（逐 offer 独立映射）
+    stats = _map_quotes(conn, task_id, quote_ids, qid)
+    return {
+        "quote_ids": quote_ids, "quote_id": qid, "status": "parsed",
+        "calc_check": calc_check, "flags": flags, "offers": len(offers),
+    }
+
+
+def _map_quotes(conn: sqlite3.Connection, task_id: int, quote_ids: list[int], qid: int | None) -> dict:
+    """语义映射阶段：逐 offer 跑 L1/L2 匹配并把原子归属写回 quote_line。"""
+    _log(conn, task_id, "mapping", "started", {"offers": len(quote_ids)}, qid)
+    stats: dict = {}
+    for offer_qid in quote_ids:
+        stats = run_mapping(offer_qid, conn)
     _log(conn, task_id, "match", "mapped", stats, qid)
-    return {"quote_id": qid, "status": "parsed", "calc_check": check, "flags": flags}
+    return stats
 
 
 def _set_task_status(conn: sqlite3.Connection, task_id: int, status: str) -> None:
@@ -182,12 +292,46 @@ def _set_task_status(conn: sqlite3.Connection, task_id: int, status: str) -> Non
         )
 
 
+def _process_one(task_id: int, project_name: str, upload: dict) -> dict:
+    """单文件流水线 worker（ThreadPoolExecutor 线程内执行）：自建 sqlite 连接（finally 关闭），
+    单文件失败（含 LLM 故障）隔离为 failed 结果并落库，不向线程外抛异常。"""
+    conn = get_connection()
+    try:
+        path = Path(upload["path"])
+        placeholder_id = upload.get("quote_id")  # create_task 预建占位行；旧日志无此字段则为 None
+        try:
+            return _process_file(conn, task_id, project_name, path, placeholder_id)
+        except LLMError as e:  # LLM 故障：与单文件异常同等隔离，标失败并继续剩余文件
+            quote_id = _mark_failed(conn, task_id, upload["original_name"], "layout", e, placeholder_id)
+            _log(
+                conn, task_id, "layout", "llm_error",
+                {"error": str(e), "type": type(e).__name__,
+                 "attempts": getattr(e, "attempts", None)}, quote_id,
+            )
+            return {"quote_id": quote_id, "status": "failed", "error": str(e)}
+        except (ParseError, IngestParseError, ValidateError, ValueError, KeyError, json.JSONDecodeError) as e:
+            quote_id = _mark_failed(conn, task_id, upload["original_name"], "parse", e, placeholder_id)
+            return {"quote_id": quote_id, "status": "failed", "error": str(e)}
+        except Exception as e:  # 兜底：单文件异常不拖垮整任务
+            quote_id = _mark_failed(conn, task_id, upload["original_name"], "parse", e, placeholder_id)
+            _log(
+                conn, task_id, "parse", "unexpected_error",
+                {"traceback": traceback.format_exc()}, quote_id,
+            )
+            return {"quote_id": quote_id, "status": "failed", "error": str(e)}
+    finally:
+        conn.close()
+
+
 def run_task(task_id: int, conn: sqlite3.Connection | None = None) -> dict:
-    """逐文件跑流水线；单文件失败标 failed 不中断；全部结束 task.status='parsed'。
-    LLM 故障（网关不可用/报错）不降级：该文件标 failed、task.status='failed'、中止剩余文件。"""
+    """并发跑各文件流水线（max_workers=PARSE_CONCURRENCY）；单文件失败（含 LLM 故障）
+    标 failed 不中断；全部 future 完成后收尾：任一文件成功 task.status='parsed'，全部失败 'failed'。
+
+    主线程 conn 只读任务/上传清单、写任务终态；worker 线程在 _process_one 内自建连接。
+    results 按上传顺序回填（与并发完成顺序无关），保持结果可对应原文件。"""
+    init_db()  # 主线程先初始化（建表/迁移/WAL），worker 线程随后各自建连
     own = conn is None
     if own:
-        init_db()
         conn = get_connection()
     results: list[dict] = []
     try:
@@ -204,35 +348,28 @@ def run_task(task_id: int, conn: sqlite3.Connection | None = None) -> dict:
                 (task_id,),
             )
         ]
-        for upload in uploads:
-            path = Path(upload["path"])
-            placeholder_id = upload.get("quote_id")  # create_task 预建占位行；旧日志无此字段则为 None
-            try:
-                results.append(_process_file(conn, task["id"], task["project_name"], path, placeholder_id))
-            except LLMError as e:  # LLM 故障：不降级，中止整个任务并反馈错误
-                quote_id = _mark_failed(conn, task_id, upload["original_name"], "layout", e, placeholder_id)
-                _log(
-                    conn, task_id, "layout", "llm_error",
-                    {"error": str(e), "type": type(e).__name__,
-                     "attempts": getattr(e, "attempts", None)}, quote_id,
-                )
-                results.append({"quote_id": quote_id, "status": "failed", "error": str(e)})
-                _set_task_status(conn, task_id, "failed")
-                return {"task_id": task_id, "task_status": "failed", "results": results,
-                        "error": f"LLM 服务不可用，任务已中止：{e}"}
-            except (ParseError, IngestParseError, ValidateError, ValueError, KeyError, json.JSONDecodeError) as e:
-                quote_id = _mark_failed(conn, task_id, upload["original_name"], "parse", e, placeholder_id)
-                results.append({"quote_id": quote_id, "status": "failed", "error": str(e)})
-            except Exception as e:  # 兜底：单文件异常不拖垮整任务
-                quote_id = _mark_failed(conn, task_id, upload["original_name"], "parse", e, placeholder_id)
-                _log(
-                    conn, task_id, "parse", "unexpected_error",
-                    {"traceback": traceback.format_exc()}, quote_id,
-                )
-                results.append({"quote_id": quote_id, "status": "failed", "error": str(e)})
+        results = [{}] * len(uploads)
+        with ThreadPoolExecutor(
+            max_workers=settings.parse_concurrency, thread_name_prefix="parse"
+        ) as pool:
+            futures = {
+                pool.submit(_process_one, task["id"], task["project_name"], upload): i
+                for i, upload in enumerate(uploads)
+            }
+            for fut in as_completed(futures):
+                i = futures[fut]
+                try:
+                    results[i] = fut.result()
+                except Exception as e:  # 防御：_process_one 已兜底，此处理论不可达
+                    results[i] = {
+                        "quote_id": uploads[i].get("quote_id"),
+                        "status": "failed", "error": str(e),
+                    }
 
-        _set_task_status(conn, task_id, FINAL_TASK_STATUS)
-        return {"task_id": task_id, "task_status": FINAL_TASK_STATUS, "results": results}
+        # 收尾：任一文件成功（parsed/reused）→ parsed；全部失败 → failed
+        final_status = "parsed" if any(r.get("status") in ("parsed", "reused") for r in results) else "failed"
+        _set_task_status(conn, task_id, final_status)
+        return {"task_id": task_id, "task_status": final_status, "results": results}
     finally:
         if own:
             conn.close()

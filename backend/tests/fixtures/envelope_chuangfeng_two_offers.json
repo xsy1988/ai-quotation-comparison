@@ -1,0 +1,610 @@
+{
+  "offers": [
+    {
+      "schema_version": "1.1",
+      "supplier": {
+        "supplier_name": "惠州市创锋科技有限公司",
+        "supplier_code": null
+      },
+      "basic": {
+        "project_name": "F06外壳",
+        "part_name": "F06外壳",
+        "scheme": "3.0mm",
+        "material_spec": "AL1070",
+        "quote_date": "2025-08-05",
+        "currency": "CNY",
+        "moq": 20000,
+        "category": "CAT-WJWK",
+        "quote_no": null,
+        "source_file": null,
+        "parse_status": "parsed"
+      },
+      "unit_price": {
+        "materials": {
+          "total": 3.0,
+          "items": [
+            {
+              "name": "AL1070",
+              "amount_per_pc": 3.0,
+              "spec": "3.0mm",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C9",
+                "raw_text": "3.00 材料"
+              }
+            }
+          ]
+        },
+        "processing": {
+          "total": 5.45,
+          "items": [
+            {
+              "name": "拉伸",
+              "amount_per_pc": 1.4,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C10",
+                "raw_text": "拉伸 1.40"
+              }
+            },
+            {
+              "name": "CNC(两夹)",
+              "amount_per_pc": 1.95,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C11",
+                "raw_text": "CNC (两夹) 1.95"
+              }
+            },
+            {
+              "name": "粗抛",
+              "amount_per_pc": 0.9,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C12",
+                "raw_text": "粗抛 0.90"
+              }
+            },
+            {
+              "name": "精抛",
+              "amount_per_pc": 0.5,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C13",
+                "raw_text": "精抛 0.5"
+              }
+            },
+            {
+              "name": "喷砂/氧化",
+              "amount_per_pc": 1.5,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C16",
+                "raw_text": "喷砂/氧化 1.50"
+              }
+            },
+            {
+              "name": "破氧白",
+              "amount_per_pc": 0.4,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C17",
+                "raw_text": "破氧白 0.40"
+              }
+            },
+            {
+              "name": "镭雕",
+              "amount_per_pc": 0.3,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C18",
+                "raw_text": "镭雕 0.30"
+              }
+            }
+          ]
+        },
+        "inspection": {
+          "total": 0.3,
+          "items": [
+            {
+              "name": "全检",
+              "amount_per_pc": 0.3,
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C18",
+                "raw_text": "全检 0.30"
+              }
+            }
+          ]
+        },
+        "packaging_transport": {
+          "total": 0.1,
+          "items": [
+            {
+              "name": "包装",
+              "amount_per_pc": 0.1,
+              "item_type": "包装",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C20",
+                "raw_text": "包装 0.10"
+              }
+            },
+            {
+              "name": "运输",
+              "amount_per_pc": 0.1,
+              "item_type": "运输",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C20",
+                "raw_text": "运输 0.10"
+              }
+            }
+          ]
+        },
+        "sga_tax": {
+          "total": 5.89,
+          "items": [
+            {
+              "name": "不良率损耗",
+              "amount_per_pc": 2.01,
+              "item_type": "损耗",
+              "rate": 0.2,
+              "note": "不良率20%",
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C21",
+                "raw_text": "不良率 20% 2.01"
+              }
+            },
+            {
+              "name": "管理费",
+              "amount_per_pc": 1.21,
+              "item_type": "管理费",
+              "rate": 0.1,
+              "note": "管理10%",
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C22",
+                "raw_text": "管理 10% 1.21"
+              }
+            },
+            {
+              "name": "利润",
+              "amount_per_pc": 0.66,
+              "item_type": "利润",
+              "rate": 0.05,
+              "note": "利润5%",
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C23",
+                "raw_text": "5% 0.66 利润"
+              }
+            },
+            {
+              "name": "税费",
+              "amount_per_pc": 2.01,
+              "item_type": "税费",
+              "rate": 0.13,
+              "note": "税率13%",
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C24",
+                "raw_text": "税率 13% 13.0%"
+              }
+            }
+          ]
+        },
+        "other": {
+          "total": null,
+          "items": []
+        },
+        "summary": {
+          "untaxed_total": 12.06,
+          "tax_amount": 2.01,
+          "taxed_total": 14.07,
+          "discount": null,
+          "final_unit_price_taxed": 15.74,
+          "calc_check": "unchecked"
+        }
+      },
+      "tooling": {
+        "total": 68500,
+        "molds": {
+          "total": 65000,
+          "items": [
+            {
+              "name": "模具费",
+              "amount": 65000,
+              "cavities": null,
+              "lifespan": null,
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C26",
+                "raw_text": "模具费 /元 65000"
+              }
+            }
+          ]
+        },
+        "fixtures": {
+          "total": 3500,
+          "items": [
+            {
+              "name": "夹具费",
+              "amount": 3500,
+              "cavities": null,
+              "lifespan": null,
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R4C25",
+                "raw_text": "夹具费 /元 3500"
+              }
+            }
+          ]
+        },
+        "stencils": {
+          "total": null,
+          "items": []
+        }
+      }
+    },
+    {
+      "schema_version": "1.1",
+      "supplier": {
+        "supplier_name": "惠州市创锋科技有限公司",
+        "supplier_code": null
+      },
+      "basic": {
+        "project_name": "F06外壳",
+        "part_name": "F06外壳",
+        "scheme": "2.5mm",
+        "material_spec": "AL1070",
+        "quote_date": "2025-08-05",
+        "currency": "CNY",
+        "moq": 20000,
+        "category": "CAT-WJWK",
+        "quote_no": null,
+        "source_file": null,
+        "parse_status": "parsed"
+      },
+      "unit_price": {
+        "materials": {
+          "total": 2.4,
+          "items": [
+            {
+              "name": "AL1070",
+              "amount_per_pc": 2.4,
+              "spec": "2.5mm",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C9",
+                "raw_text": "2.40"
+              }
+            }
+          ]
+        },
+        "processing": {
+          "total": 5.25,
+          "items": [
+            {
+              "name": "拉伸",
+              "amount_per_pc": 1.2,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C10",
+                "raw_text": "1.20"
+              }
+            },
+            {
+              "name": "CNC(两夹)",
+              "amount_per_pc": 1.85,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C11",
+                "raw_text": "1.85"
+              }
+            },
+            {
+              "name": "粗抛",
+              "amount_per_pc": 0.9,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C12",
+                "raw_text": "0.90"
+              }
+            },
+            {
+              "name": "精抛",
+              "amount_per_pc": 0.5,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C13",
+                "raw_text": "0.5"
+              }
+            },
+            {
+              "name": "喷砂/氧化",
+              "amount_per_pc": 1.5,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C16",
+                "raw_text": "1.50"
+              }
+            },
+            {
+              "name": "破氧白",
+              "amount_per_pc": 0.4,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C17",
+                "raw_text": "0.40"
+              }
+            },
+            {
+              "name": "镭雕",
+              "amount_per_pc": 0.3,
+              "atom_code": null,
+              "is_new_process": false,
+              "bundle_flag": false,
+              "confidence": "low",
+              "match_path": null,
+              "confirm_status": "unconfirmed",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C18",
+                "raw_text": "0.30"
+              }
+            }
+          ]
+        },
+        "inspection": {
+          "total": 0.3,
+          "items": [
+            {
+              "name": "全检",
+              "amount_per_pc": 0.3,
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C18",
+                "raw_text": "0.30"
+              }
+            }
+          ]
+        },
+        "packaging_transport": {
+          "total": 0.1,
+          "items": [
+            {
+              "name": "包装",
+              "amount_per_pc": 0.1,
+              "item_type": "包装",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C20",
+                "raw_text": "0.10"
+              }
+            },
+            {
+              "name": "运输",
+              "amount_per_pc": 0.1,
+              "item_type": "运输",
+              "note": null,
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C20",
+                "raw_text": "0.10"
+              }
+            }
+          ]
+        },
+        "sga_tax": {
+          "total": 5.36,
+          "items": [
+            {
+              "name": "不良率损耗",
+              "amount_per_pc": 1.83,
+              "item_type": "损耗",
+              "rate": 0.2,
+              "note": "不良率20%",
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C21",
+                "raw_text": "1.83"
+              }
+            },
+            {
+              "name": "管理费",
+              "amount_per_pc": 1.1,
+              "item_type": "管理费",
+              "rate": 0.1,
+              "note": "管理10%",
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C22",
+                "raw_text": "1.10"
+              }
+            },
+            {
+              "name": "利润",
+              "amount_per_pc": 0.6,
+              "item_type": "利润",
+              "rate": 0.05,
+              "note": "利润5%",
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C23",
+                "raw_text": "0.60"
+              }
+            },
+            {
+              "name": "税费",
+              "amount_per_pc": 1.83,
+              "item_type": "税费",
+              "rate": 0.13,
+              "note": "税率13%",
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C24",
+                "raw_text": "13.0%"
+              }
+            }
+          ]
+        },
+        "other": {
+          "total": null,
+          "items": []
+        },
+        "summary": {
+          "untaxed_total": 11.68,
+          "tax_amount": 1.83,
+          "taxed_total": 13.51,
+          "discount": null,
+          "final_unit_price_taxed": 14.33,
+          "calc_check": "unchecked"
+        }
+      },
+      "tooling": {
+        "total": 68500,
+        "molds": {
+          "total": 65000,
+          "items": [
+            {
+              "name": "模具费",
+              "amount": 65000,
+              "cavities": null,
+              "lifespan": null,
+              "note": "共用",
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C26",
+                "raw_text": "模具费 /元 65000"
+              }
+            }
+          ]
+        },
+        "fixtures": {
+          "total": 3500,
+          "items": [
+            {
+              "name": "夹具费",
+              "amount": 3500,
+              "cavities": null,
+              "lifespan": null,
+              "note": "共用",
+              "evidence": {
+                "file": "报价单",
+                "location": "page_1!R5C25",
+                "raw_text": "夹具费 /元 3500"
+              }
+            }
+          ]
+        },
+        "stencils": {
+          "total": null,
+          "items": []
+        }
+      }
+    }
+  ]
+}

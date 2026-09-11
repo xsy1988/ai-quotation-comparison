@@ -1,0 +1,49 @@
+{
+  "cases": [
+    {
+      "name": "chuangfeng_two_offers",
+      "envelope": "../envelope_chuangfeng_two_offers.json",
+      "ir": "../ir_chuangfeng.json",
+      "expected_offers": [
+        {
+          "untaxed_total": 13.93,
+          "tax_amount": 1.81,
+          "taxed_total": 15.74,
+          "final_unit_price_taxed": 15.74,
+          "processing_total": 6.65,
+          "kept_item_amounts": {"inspection.全检": 0.3},
+          "item_amounts": {
+            "processing.拉伸": 1.4,
+            "processing.CNC(两夹)": 1.95,
+            "processing.粗抛": 0.9,
+            "processing.精抛": 0.5,
+            "processing.喷砂/氧化": 1.5,
+            "processing.镭雕": 0.0,
+            "inspection.全检": 0.3,
+            "sga_tax.税费": 1.81
+          },
+          "absent_items": ["processing.其它工艺", "processing.破氧", "processing.白", "processing.全检"]
+        },
+        {
+          "untaxed_total": 12.68,
+          "tax_amount": 1.65,
+          "taxed_total": 14.33,
+          "final_unit_price_taxed": 14.33,
+          "processing_total": 6.35,
+          "kept_item_amounts": {"inspection.全检": 0.3},
+          "item_amounts": {
+            "processing.拉伸": 1.2,
+            "processing.CNC(两夹)": 1.85,
+            "processing.粗抛": 0.9,
+            "processing.精抛": 0.5,
+            "processing.喷砂/氧化": 1.5,
+            "processing.镭雕": 0.0,
+            "inspection.全检": 0.3,
+            "sga_tax.税费": 1.65
+          },
+          "absent_items": ["processing.其它工艺", "processing.破氧", "processing.白", "processing.全检"]
+        }
+      ]
+    }
+  ]
+}

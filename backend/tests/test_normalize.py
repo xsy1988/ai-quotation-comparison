@@ -1,4 +1,11 @@
-from app.normalize import normalize_amount, normalize_currency, normalize_date, normalize_rate
+from app.normalize import (
+    amount_in_text,
+    amount_occurrences,
+    normalize_amount,
+    normalize_currency,
+    normalize_date,
+    normalize_rate,
+)
 
 
 def test_pure_amount_with_currency():
@@ -47,3 +54,20 @@ def test_normalize_currency():
     assert normalize_currency("人民币") == "CNY"
     assert normalize_currency("US$") == "USD"
     assert normalize_currency("未知币") == "OTHER"
+
+
+def test_amount_in_text_word_boundary():
+    """词边界出处比对：候选前后不得再跟数字/小数点。"""
+    assert amount_in_text("全检 0.30", 0.3)  # 0.3 命中两位小数写法
+    assert amount_in_text("损管利税 2.01", 2.01)
+    assert not amount_in_text("合计 10.30", 0.3)  # "0.30" 是 "10.30" 的子串，不命中
+    assert not amount_in_text("税率 13.0%", 0.0)  # "0" 是 "13.0" 的子串，不命中
+    assert not amount_in_text("不良率 20% 2.01", 0.2)  # "0.2" 是 "20" 的数字邻居场景
+    assert not amount_in_text(None, 0.3)
+    assert not amount_in_text("", 0.3)
+
+
+def test_amount_occurrences_counts_boundary_hits():
+    assert amount_occurrences("全检 0.30", 0.3) == 1
+    assert amount_occurrences("0.30 0.30", 0.3) == 2  # 恰好出现一次判定的反例
+    assert amount_occurrences("10.30", 0.3) == 0

@@ -122,6 +122,134 @@ def test_pdf_to_ir_no_text_layer_uses_vision_ocr(sandbox, monkeypatch):
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
+def test_pdf_to_ir_ocr_native_lines_clustered(sandbox, monkeypatch):
+    """OCR 专用模型原生输出（rotate_rect/text 数组，无视提示词格式）按视觉行列聚类成 IR 行。
+
+    rotate_rect 为 [x, y, h, w, angle]（angle 恒 90°，第三分量是文本高），行聚类按 y 区间重叠。
+    """
+    native = {
+        "lines": [
+            {"rotate_rect": [10, 10, 20, 120, 90], "text": "序号"},
+            {"rotate_rect": [140, 12, 18, 80, 90], "text": "品名"},
+            {"rotate_rect": [12, 40, 18, 10, 90], "text": "1"},
+            {"rotate_rect": [142, 41, 18, 60, 90], "text": "F06外壳"},
+        ]
+    }
+
+    def fake_chat_json(messages, *, model=None, client=None):
+        return native, {"model": model}
+
+    monkeypatch.setattr("app.llm.client.chat_json", fake_chat_json)
+    path = _make_pdf(sandbox / "scan.pdf", with_text=False)
+
+    ir = ingest_formats.pdf_to_ir(path, "hash")
+
+    assert [(t.row_number, [(c.col, c.value) for c in t.cells]) for t in ir.tables] == [
+        (1, [(1, "序号"), (2, "品名")]),
+        (2, [(1, "1"), (2, "F06外壳")]),
+    ]
+
+
+def test_pdf_to_ir_ocr_native_stacked_header_aligns_with_body_column():
+    """两行堆叠的表头单元格（脱墨/氧化）合并为完整列名并与表体同列号，版面 LLM 不再对错列。"""
+    from app.ingest_formats import _cluster_native_lines
+
+    items = [
+        {"rotate_rect": [540, 200, 17, 21, 90], "text": "脱墨"},
+        {"rotate_rect": [538, 218, 23, 23, 90], "text": "氧化"},
+        {"rotate_rect": [280, 210, 17, 21, 90], "text": "材料"},
+        {"rotate_rect": [280, 256, 13, 21, 90], "text": "2.20"},
+        {"rotate_rect": [540, 256, 13, 21, 90], "text": "1.30"},
+    ]
+    text = _cluster_native_lines(items)
+    body_row = next(l for l in text.splitlines() if ":2.20" in l)
+    header_row = next(l for l in text.splitlines() if "脱墨" in l)
+    body_col_130 = next(c.split(":")[0] for c in body_row.split("|") if c.endswith(":1.30"))
+    header_cells = header_row.split("|")[2:]
+    # 竖排碎片合并为一个完整单元格，列号与表体 1.30 对齐
+    assert f"{body_col_130}:脱墨氧化" in header_cells
+
+
+def test_pdf_to_ir_ocr_stacked_header_fragments_merge_full_column():
+    """创锋回归：窄列竖排表头"镭雕/破氧/白"合并为完整列名，且不链式吞并紧贴的数据行。
+
+    旧实现按运行 y_end 链式聚行：表头三段碎片与下方 0.40/0.30 数据行并入同一视觉行，
+    再经全局列量化得到 17:破氧|17:白|17:0.40|17:镭雕 的伪列碎片，导致 LLM 张冠李戴。
+    """
+    from app.ingest_formats import _cluster_native_lines
+
+    items = [
+        {"rotate_rect": [10, 100, 16, 30, 90], "text": "项次"},
+        {"rotate_rect": [60, 100, 16, 30, 90], "text": "品名"},
+        {"rotate_rect": [500, 96, 16, 40, 90], "text": "镭雕"},
+        {"rotate_rect": [502, 116, 16, 40, 90], "text": "破氧"},
+        {"rotate_rect": [508, 136, 16, 20, 90], "text": "白"},
+        {"rotate_rect": [560, 100, 16, 40, 90], "text": "全检"},
+        # 数据行紧贴表头（与"白"底边仅 2px，小于旧链式 gap）：仍须独立成行
+        {"rotate_rect": [10, 154, 16, 10, 90], "text": "1"},
+        {"rotate_rect": [60, 154, 16, 60, 90], "text": "F06外壳"},
+        {"rotate_rect": [500, 154, 16, 40, 90], "text": "0.40"},
+        {"rotate_rect": [560, 154, 16, 40, 90], "text": "0.30"},
+    ]
+    lines = _cluster_native_lines(items).splitlines()
+
+    assert len(lines) == 2  # 表头行 + 数据行，互不吞并
+    header, body = lines
+    header_cells = dict(p.split(":", 1) for p in header.split("|")[2:])
+    body_cells = dict(p.split(":", 1) for p in body.split("|")[2:])
+    # "镭雕破氧白"为完整列名，且与数据 0.40 同列；"全检"与 0.30 同列
+    assert "镭雕破氧白" in header_cells.values()
+    col_laser = next(c for c, v in header_cells.items() if v == "镭雕破氧白")
+    col_qc = next(c for c, v in header_cells.items() if v == "全检")
+    assert body_cells[col_laser] == "0.40"
+    assert body_cells[col_qc] == "0.30"
+    # 无伪列：同一行内列号唯一
+    assert len(header_cells) == len(header.split("|")) - 2
+
+
+def test_pdf_to_ir_multiline_header_cell_joined(sandbox):
+    """pdfplumber 路径：换行表头单元格合并为完整列名，不带换行符拆散 IR 序列化。"""
+    reportlab = pytest.importorskip("reportlab")
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfgen import canvas
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    path = sandbox / "multiline_header.pdf"
+    c = canvas.Canvas(str(path), pagesize=A4)
+    c.setFont("STSong-Light", 10)
+    x0, x1, x2 = 72, 250, 450
+    ytop, ymid, ybot = 720, 680, 650
+    for x in (x0, x1, x2):
+        c.line(x, ytop, x, ybot)
+    for y in (ytop, ymid, ybot):
+        c.line(x0, y, x2, y)
+    c.drawString(x0 + 4, ytop - 14, "工艺")
+    c.drawString(x1 + 4, ytop - 14, "镭雕破氧")
+    c.drawString(x1 + 4, ytop - 28, "白")
+    c.drawString(x0 + 4, ymid - 14, "镭雕")
+    c.drawString(x1 + 4, ymid - 14, "0.40")
+    c.showPage()
+    c.save()
+
+    ir = ingest_formats.pdf_to_ir(path, "hash")
+
+    values = [cell.value for t in ir.tables for cell in t.cells]
+    assert "镭雕破氧白" in values  # 完整列名，不拆成伪列/碎片
+    assert all("\n" not in str(v) for v in values)  # 无换行符破坏 IR 行序列化
+
+
+def test_join_cell_lines_multiline_header():
+    """单元格内换行合并：CJK 直接拼接，拉丁边界补空格。"""
+    from app.ingest_formats import _join_cell_lines
+
+    assert _join_cell_lines("镭雕\n破氧\n白") == "镭雕破氧白"
+    assert _join_cell_lines("成品\n全检费") == "成品全检费"
+    assert _join_cell_lines("合计价\n格") == "合计价格"
+    assert _join_cell_lines("Unit\nPrice") == "Unit Price"
+
+
 def test_pdf_to_ir_mixed_text_and_scan_pages(sandbox, monkeypatch):
     """混合文档：第 1 页文字层直接抽取，第 2 页扫描页走 OCR，各自归入 page_N。"""
     calls = []
@@ -175,7 +303,7 @@ def test_image_to_ir_prompt_and_multimodal(sandbox, monkeypatch):
     assert calls["model"] == "qwen3.5-ocr"
     content = calls["messages"][0]["content"]
     assert content[0]["type"] == "text"
-    assert "IR 行格式" in content[0]["text"] and '"lines"' in content[0]["text"]
+    assert "rotate_rect" in content[0]["text"] and '"lines"' in content[0]["text"]
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 

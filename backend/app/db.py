@@ -1,23 +1,27 @@
-import os
 import sqlite3
 from pathlib import Path
+
+from app.config import settings
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "quotes.db"
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
 
 def get_db_path() -> Path:
-    override = os.environ.get("QUOTES_DB_PATH")
+    override = settings.quotes_db_path
     return Path(override) if override else DEFAULT_DB_PATH
 
 
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
+    """每调用新建连接（并发解析时各 worker 线程一连）。WAL + busy_timeout：
+    读写可并发，多线程写冲突时最多等 30s 而非立刻 SQLITE_BUSY。"""
     path = db_path or get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 

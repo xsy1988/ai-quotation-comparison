@@ -11,8 +11,10 @@ const STAGE_INDEX: Record<string, number> = {
   dedup: 1, // 查重+文件接入同属 dedup 日志段
   layout: 2,
   match: 3,
+  mapping: 3, // mapping/started（语义映射起点）与 match 同属"匹配"段
   validate: 4,
   persist: 4,
+  verify: 4, // LLM-B 核算复核归入"校验"段
 }
 // 进度条上方状态标签的友好文案
 const STAGE_LABEL: Record<string, string> = {
@@ -20,8 +22,10 @@ const STAGE_LABEL: Record<string, string> = {
   dedup: '接入查重',
   layout: '版面解析',
   match: '语义映射',
+  mapping: '语义映射',
   validate: '校验',
   persist: '落库',
+  verify: '核算复核',
 }
 
 const DONE_STATUSES = new Set(['parsed', 'reviewed'])
@@ -149,6 +153,9 @@ export default function ProgressPage() {
                     ) : (
                       <Tag color="processing">
                         {quote.stage ? (STAGE_LABEL[quote.stage] ?? quote.stage) : '排队中'}
+                        {quote.action === 'retry_round' && quote.detail?.round
+                          ? ` · 第 ${quote.detail.round} 轮重试`
+                          : ''}
                       </Tag>
                     )}
                   </div>

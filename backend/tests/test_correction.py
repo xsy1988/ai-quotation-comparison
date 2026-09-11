@@ -274,7 +274,7 @@ def test_category_change_resets_and_reruns(prepared, monkeypatch):
     conn.close()
     assert lines["CNC加工"]["atom_code"] == "AT-QX-001"
     assert lines["CNC加工"]["match_path"] == "L1_alias"
-    assert lines["EDM"]["atom_code"] == "AT-QT-001"  # L2 空映射 → 兜底
+    assert lines["EDM"]["atom_code"] is None  # L2 空映射 → 清单外新工艺
     assert lines["EDM"]["match_path"] == "L2_llm"
     assert lines["EDM"]["is_new_process"] == 1
     # manual 条目不被覆盖

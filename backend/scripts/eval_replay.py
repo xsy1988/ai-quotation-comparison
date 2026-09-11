@@ -28,6 +28,77 @@ EXPECTED_KEYS = {
     "category", "expected_atoms", "unmatched_new_process",
 }
 
+GOLD_MANIFEST_NAME = "gold_derive_cases.json"
+
+
+def _run_gold_derive_cases(corpus_dir: Path) -> tuple[int, int, list[str]]:
+    """确定性 derive 金标案例（信封+IR 重放，无 LLM 依赖）：summary/processing.total
+    与金标值比对。返回 (通过数, 总数, 失败明细)。"""
+    manifest_path = corpus_dir / GOLD_MANIFEST_NAME
+    if not manifest_path.exists():
+        return (0, 0, [])
+    from app.derive import derive_offer
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    hit = total = 0
+    failures: list[str] = []
+    for case in manifest["cases"]:
+        envelope = json.loads((corpus_dir / case["envelope"]).read_text(encoding="utf-8"))
+        ir = json.loads((corpus_dir / case["ir"]).read_text(encoding="utf-8"))
+        ok = True
+        detail: list[str] = []
+        offers = envelope.get("offers") or []
+        if len(offers) != len(case["expected_offers"]):
+            ok = False
+            detail.append(f"offer 数 {len(offers)} != 期望 {len(case['expected_offers'])}")
+        for idx, (offer, exp) in enumerate(zip(offers, case["expected_offers"])):
+            derive_offer(offer, ir=ir)
+            summary = offer["unit_price"]["summary"]
+            checks = {
+                "untaxed_total": summary["untaxed_total"],
+                "tax_amount": summary["tax_amount"],
+                "taxed_total": summary["taxed_total"],
+                "final_unit_price_taxed": summary["final_unit_price_taxed"],
+                "processing_total": offer["unit_price"]["processing"]["total"],
+            }
+            expected_map = {key: float(exp[key]) for key in checks}
+            for ref, expected_amount in (exp.get("kept_item_amounts") or {}).items():
+                module, _, item_name = ref.partition(".")
+                actual = next(
+                    (i.get("amount_per_pc") for i in offer["unit_price"][module]["items"]
+                     if i.get("name") == item_name),
+                    None,
+                )
+                checks[f"kept_item_amounts.{ref}"] = actual
+                expected_map[f"kept_item_amounts.{ref}"] = float(expected_amount)
+            for ref, expected_amount in (exp.get("item_amounts") or {}).items():
+                module, _, item_name = ref.partition(".")
+                actual = next(
+                    (i.get("amount_per_pc") for i in offer["unit_price"][module]["items"]
+                     if i.get("name") == item_name),
+                    None,
+                )
+                checks[f"item_amounts.{ref}"] = actual
+                expected_map[f"item_amounts.{ref}"] = float(expected_amount)
+            for key, actual in checks.items():
+                expected = expected_map[key]
+                if actual is None or abs(float(actual) - expected) > 0.011:
+                    ok = False
+                    detail.append(f"offer{idx + 1}.{key} 期望 {expected} 实际 {actual}")
+            # 负断言：碎片/错挂科目不应出现（如"其它工艺"）
+            for ref in (exp.get("absent_items") or []):
+                module, _, item_name = ref.partition(".")
+                if any(
+                    i.get("name") == item_name for i in offer["unit_price"][module]["items"]
+                ):
+                    ok = False
+                    detail.append(f"offer{idx + 1}.absent_items.{ref} 不应出现")
+        total += 1
+        hit += int(ok)
+        if not ok:
+            failures.append(f"{case['name']}：{'；'.join(detail)}")
+    return hit, total, failures
+
 
 def _load_expected(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -42,14 +113,16 @@ def _run_full_chain(xlsx: Path, workdir: Path) -> dict:
     import app.ingest as ingest
     import app.persist as persist
     from app.db import get_connection, init_db
+    from app.derive import derive_offer
     from app.ingest import ingest_file
     from app.ir import IR
     from app.persist import persist_quote
     from app.pipeline.layout_understand import parse_ir_with_llm_traced
     from app.pipeline.mapping_runner import run_mapping
-    from app.validate.validate import validate_quote_full
+    from app.validate.validate import validate_quote_full, iter_offers
 
     os.environ["QUOTES_DB_PATH"] = str(workdir / "quotes.db")
+    os.environ["LLM_B_VERIFY"] = "0"  # 回归脚本只测确定性链路，影子复核另行单测
     ingest.ARCHIVE_DIR = workdir / "archive"
     ingest.IR_DIR = workdir / "ir"
     persist.SNAPSHOT_DIR = workdir / "snapshots"
@@ -61,10 +134,19 @@ def _run_full_chain(xlsx: Path, workdir: Path) -> dict:
     conn = get_connection()
     try:
         data, attempts, cross = parse_ir_with_llm_traced(ir, conn=conn)
-        calc_check, flags = validate_quote_full(conn, data)
-        pres = persist_quote(data, project_name="eval", file_hash=ingest_result["sha256"])
-        quote_id = pres["quote_id"]
-        run_mapping(quote_id, conn)
+        calc_check = "unchecked"
+        flags: list[str] = []
+        quote_id = None
+        for offer in iter_offers(data):
+            derive_offer(offer, ir=ir)
+            calc_check, flags = validate_quote_full(conn, offer)
+            pres = persist_quote(offer, project_name="eval", file_hash=ingest_result["sha256"])
+            if quote_id is None:
+                quote_id = pres["quote_id"]
+            run_mapping(pres["quote_id"], conn)
+        if quote_id is None:
+            raise ValueError("解析结果无 offer")
+        offer = iter_offers(data)[0]  # 回归集样例均为单 offer，指标取首个
         quote = conn.execute(
             "SELECT supplier_name, category_code FROM quote WHERE id = ?", (quote_id,)
         ).fetchone()
@@ -78,7 +160,7 @@ def _run_full_chain(xlsx: Path, workdir: Path) -> dict:
 
     return {
         "supplier_name": quote["supplier_name"],
-        "final_unit_price_taxed": data["unit_price"]["summary"]["final_unit_price_taxed"],
+        "final_unit_price_taxed": offer["unit_price"]["summary"]["final_unit_price_taxed"],
         "calc_check": calc_check,
         "category": quote["category_code"],
         "atoms": {r["item_name"].strip(): r["atom_code"] for r in lines},
@@ -154,6 +236,11 @@ def main() -> None:
     if not xlsx_files:
         raise SystemExit(f"回归集目录无样例：{args.corpus}")
 
+    # 金标 derive 回归（确定性规则重放，先跑；劣化时后续 LLM 全链仍照常执行）
+    gold_hit, gold_total, gold_failures = _run_gold_derive_cases(args.corpus)
+    if gold_total:
+        print(f"金标 derive 回归：{gold_hit}/{gold_total} 通过\n")
+
     header = f"{'样例':<24}{'价格':<6}{'供应商':<8}{'勾稽':<6}{'品类':<6}{'原子命中':<14}{'L2兜底':<8}{'交叉验证':<8}"
     print(f"回归集：{args.corpus}（{len(xlsx_files)} 份，真实网关全链重放）\n")
     print(header)
@@ -222,6 +309,11 @@ def main() -> None:
                 if not d.get("ok"):
                     print(f"  {dim}: 期望 {d.get('expected')!r}，实际 {d.get('actual')!r}"
                           + (f"，未命中 {d['detail']}" if d.get("detail") else ""))
+
+    if gold_failures:
+        print("\n== 金标 derive 失败明细 ==")
+        for line in gold_failures:
+            print(f"  {line}")
 
 
 if __name__ == "__main__":

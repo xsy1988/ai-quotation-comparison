@@ -7,8 +7,6 @@ import json
 import re
 import sqlite3
 
-FALLBACK_ATOM_CODE = "AT-QT-001"
-
 HIERARCHY_ROWS: list[tuple[str, str, str]] = [
     ("materials", "材料费", "module"),
     ("processing", "加工费", "module"),
@@ -25,7 +23,12 @@ HIERARCHY_ROWS: list[tuple[str, str, str]] = [
 
 DRAWER_SCOPES = ("process_domain", "process_stage", "process_class")
 UNMATCHED_BUCKET_CODE = "unmatched"
-OTHER_PROCESS_BUCKET_CODE = "other_process"
+
+
+def _is_shared_item(note: str | None, amount) -> bool:
+    """共享单元格去重的置零副本（derive 规则 A）：note 带共享标记且金额已置 0。
+    前端据此把金额显示为"/"，备注在 tooltip 展示。"""
+    return amount == 0 and bool(note) and "共享单元格" in note
 
 
 def _task_quotes(conn: sqlite3.Connection, task_id: int) -> list[sqlite3.Row]:
@@ -41,18 +44,23 @@ def _task_quotes(conn: sqlite3.Connection, task_id: int) -> list[sqlite3.Row]:
 
 
 def _suppliers(quotes: list[sqlite3.Row]) -> list[dict]:
-    return [
-        {
-            "quote_id": row["id"],
-            "supplier_name": row["supplier_name"],
-            "supplier_code": row["supplier_code"],
-            "flags": json.loads(row["flags"] or "[]"),
-            "calc_check": row["calc_check"],
-            "final_unit_price_taxed": row["final_unit_price_taxed"],
-            "category_code": row["category_code"],
-        }
-        for row in quotes
-    ]
+    suppliers = []
+    for row in quotes:
+        basic = json.loads(row["basic_info"] or "{}")
+        suppliers.append(
+            {
+                "quote_id": row["id"],
+                "supplier_name": row["supplier_name"],
+                "supplier_code": row["supplier_code"],
+                "part_name": basic.get("part_name"),
+                "scheme": basic.get("scheme"),
+                "flags": json.loads(row["flags"] or "[]"),
+                "calc_check": row["calc_check"],
+                "final_unit_price_taxed": row["final_unit_price_taxed"],
+                "category_code": row["category_code"],
+            }
+        )
+    return suppliers
 
 
 def _hierarchy(conn: sqlite3.Connection, quote_ids: list[int]) -> list[dict]:
@@ -104,6 +112,7 @@ def _processing_details(conn: sqlite3.Connection, quote_ids: list[int]) -> list[
                 "is_new_process": bool(row["is_new_process"]),
                 "match_path": row["match_path"],
                 "note": row["note"],
+                "is_shared": _is_shared_item(row["note"], row["amount"]),
             }
             for row in conn.execute(
                 "SELECT id, item_name, amount, atom_code, confidence, fingerprint,"
@@ -124,7 +133,8 @@ def _drawer_bucket(conn: sqlite3.Connection, quote_ids: list[int], members: list
         for qid in quote_ids:
             total = conn.execute(
                 "SELECT SUM(amount) FROM quote_line"
-                " WHERE quote_id = ? AND module = 'processing' AND atom_code IS NULL",
+                " WHERE quote_id = ? AND module = 'processing'"
+                " AND atom_code IS NULL",
                 (qid,),
             ).fetchone()[0]
             values[qid] = round(total, 6) if total is not None else None
@@ -157,7 +167,10 @@ def _drawers(conn: sqlite3.Connection, quote_ids: list[int]) -> list[dict]:
     for scope in DRAWER_SCOPES:
         scope_groups: list[dict] = []
         for row in by_scope[scope]:
+            # 空成员组不下发（避免与未匹配桶重复计数）
             members = json.loads(row["member_atoms"] or "[]")
+            if not members:
+                continue
             scope_groups.append(
                 {
                     "group_code": row["group_code"],
@@ -171,14 +184,6 @@ def _drawers(conn: sqlite3.Connection, quote_ids: list[int]) -> list[dict]:
                 "group_code": UNMATCHED_BUCKET_CODE,
                 "group_name": "未匹配",
                 "values": _drawer_bucket(conn, quote_ids, [None]),
-                "is_fallback_bucket": True,
-            }
-        )
-        scope_groups.append(
-            {
-                "group_code": OTHER_PROCESS_BUCKET_CODE,
-                "group_name": "其它工艺",
-                "values": _drawer_bucket(conn, quote_ids, [FALLBACK_ATOM_CODE]),
                 "is_fallback_bucket": True,
             }
         )
@@ -365,6 +370,7 @@ def _processing_children(
     """加工费明细 children：按原子码跨供应商对齐（同名同事序一行对比，如 CNC/cnc 合并），
     未匹配条目按归一化名称（忽略大小写）对齐；行序取路线出现顺序。
     meta 带 quote_line id/atom/confidence/match_path/原文 name 等供就地编辑；
+    is_shared 标记共享单元格去重的置零副本（金额显示"/"）；
     scope_meta 带原子所属工艺域/阶段/类别，供前端切换分组展示。"""
     by_quote = {d["quote_id"]: d["items"] for d in processing_details}
 
@@ -400,6 +406,7 @@ def _processing_children(
                 "fingerprint": first["fingerprint"],
                 "note": first["note"],
                 "name": first["name"],
+                "is_shared": first["is_shared"],
             }
         if key.startswith("atom:"):
             code = key[len("atom:"):]

@@ -4,8 +4,8 @@
     uv run python scripts/make_eval_corpus.py
 
 8 份样例覆盖：基准、L1 别名命中（CNC 加工/氧化/干喷砂/阳极处理）、币种变体、
-清单外工艺 L2 兜底（真空离子镀膜/激光咬花 → AT-QT-001）、勾稽有意出错（calc_check=fail）、
-品类切换（塑胶 CAT-SJ）、别名+兜底混合。
+清单外工艺 L2 判新工艺（激光咬花 → atom_code 留空 + is_new_process）、勾稽有意出错（calc_check=fail）、
+品类切换（塑胶 CAT-SJ）、别名+新工艺混合。
 """
 
 import json
@@ -31,7 +31,6 @@ ATOM_CNC = "AT-QX-001"      # CNC加工
 ATOM_ANODIZE = "AT-ZH-013"  # 阳极氧化
 ATOM_SANDBLAST = "AT-ZP-005"  # 喷砂
 ATOM_INJECT = "AT-CX-035"   # 注塑成型（含塑胶品类）
-FALLBACK_ATOM = "AT-QT-001"  # 其它工艺（兜底）
 
 # 每份样例：蓝本变体 + 标注期望
 SPECS = [
@@ -120,7 +119,7 @@ SPECS = [
     },
     {
         "name": "eval_07_mixed",
-        "description": "别名+兜底混合：激光咬花应 L2 兜底，CNC 加工/干喷砂 L1 别名命中",
+        "description": "别名+新工艺混合：激光咬花应 L2 判新工艺（atom_code 留空），CNC 加工/干喷砂 L1 别名命中",
         "supplier": "深圳市凯盛五金制品有限公司",
         "part_name": "铝合金外壳",
         "material_spec": "AL6063-T5",
@@ -129,7 +128,7 @@ SPECS = [
         "scale": 1.1,
         "category": "CAT-WJWK",
         "renames": {"CNC加工": "CNC 加工", "阳极氧化": "激光咬花", "喷砂": "干喷砂"},
-        "expected_atoms": {"CNC 加工": ATOM_CNC, "激光咬花": FALLBACK_ATOM, "干喷砂": ATOM_SANDBLAST},
+        "expected_atoms": {"CNC 加工": ATOM_CNC, "激光咬花": None, "干喷砂": ATOM_SANDBLAST},
         "unmatched_new_process": ["激光咬花"],
     },
     {

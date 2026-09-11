@@ -1,10 +1,17 @@
-"""LLM 版面理解：IR → quote_schema v1.1 JSON + 品类判定 + 脚本交叉验证。
+"""LLM 版面理解：IR → 信封 JSON {"offers": [...]} + 品类判定 + 脚本交叉验证。
 
-主入口 parse_ir_with_llm（返回纯 quote JSON）与 parse_ir_with_llm_traced
+主入口 parse_ir_with_llm（返回信封 JSON）与 parse_ir_with_llm_traced
 （额外返回 LLM 调用尝试记录与 cross_check 结果，pipeline 记 parse_log 用）。
+offers 按"产品 × 报价方案"拆分：同产品多方案、多产品报价单各为一个 offer；
+普通报价单只有 1 个元素（兼容旧格式：LLM 输出无 offers 层时自动包一层）。
 
-流程：IR 紧凑序列化 → 压缩版 schema prompt（含品类清单）→ chat_json →
-Draft7 校验，失败把错误列表 append 进对话重试 1 次，仍失败抛 LLMUnavailable。
+流程：IR 紧凑序列化 → prompts 注册表组装 prompt（constitution 全局宪法 + parse_quote
+模板含品类清单与负例）→ chat_json → 摘取 offer._self_check 存档 _derived →
+信封结构 + 逐 offer Draft7 校验，失败用 retry_feedback 模板把错误列表 append 进对话重试，
+上限 3 轮（schema 类按 schema_invalid 反馈、JSON 解析失败按 json_unparseable 反馈）；
+L0 通过后跑 L1 溯源校验（金额必须在自身 evidence.raw_text 中、坐标必须落在 IR 范围内，
+traceability 反馈），第 3 轮仍失败抛 LLMValidateError。L1 通过（或仅 info 级）时 L2 勾稽
+问题（blame=B）写入 attempts 末条 l2_issues 只记录不打断。
 成功后跑 cross_check：独立脚本侧解析（自带简化关键词分类器，不复用规则解析器）
 与 LLM 条目按 evidence.location 行号对账，差异写 _cross_check 供 persist 落库。
 """
@@ -15,13 +22,16 @@ from typing import Any
 
 from jsonschema import Draft7Validator
 
+from app import prompts
 from app.ir import IR
 from app.llm import client as llm_client
 from app.llm.client import LLMError, LLMUnavailable
 from app.normalize import normalize_amount
-from app.validate.validate import MODULES, load_schema
+from app.validate.validate import MODULES, iter_offers, load_envelope_schema, load_schema
+from app.validate.validators import validate_l1_traceability, validate_l2_reconcile
 
-FALLBACK_ATOM = "AT-QT-001"
+MAX_ATTEMPTS = 3
+"""LLM 版面理解最大尝试轮数（含首轮）：schema/溯源/解析失败均按此上限重试。"""
 
 # conn 不可用时兜底品类清单（与 scripts/import_master_data.py 保持一致）
 DEFAULT_CATEGORIES = [
@@ -33,58 +43,6 @@ DEFAULT_CATEGORIES = [
     ("CAT-GJ", "硅胶"),
     ("CAT-BC", "包材"),
 ]
-
-_SCHEMA_BRIEF = """把报价单解析为 JSON，严格符合 quote_schema v1.1（压缩版字段说明）：
-
-顶层（required 标*）：
-- schema_version: "1.1"
-- supplier*: {supplier_name*: 字符串, supplier_code: null}
-- basic*: {project_name: 字符串|null, part_name*: 字符串, material_spec: 字符串|null,
-  quote_date: "YYYY-MM-DD"|null, currency*: 枚举(CNY/USD/EUR/JPY/HKD/TWD/KRW/OTHER，判断不了填CNY),
-  moq: 数字|null, category: 品类编码|null（见下方品类清单）, quote_no: 字符串|null,
-  source_file: 字符串|null, parse_status: "parsed"}
-- unit_price*: {materials*, processing*, inspection*, packaging_transport*, sga_tax*, other*, summary*}
-- tooling: 对象|null（无模治具费用时填 null）
-
-金额单位：unit_price 下所有金额 = 元/pcs；tooling 下 = 元/项（一次性费用）。
-六费用模块结构均为 {total: 数字|null, items: [...]}。供应商只报模块总价时 total 填数、items 为空数组。
-
-各模块 items 字段（required 标*）：
-- materials: {name*, amount_per_pc*, spec: 字符串|null, note: 字符串|null, evidence}
-  （name 必须用材料的具体名称/牌号，如"ADC12铝合金"，与 basic.material_spec 保持一致；
-  不要用"原材料/材料费/材料"这类栏目名）
-- processing: {name*, amount_per_pc*, atom_code: null, is_new_process: false, bundle_flag: false,
-  confidence: "low", match_path: null, confirm_status: "unconfirmed", note: 字符串|null, evidence}
-  （工艺原子映射是后续阶段的事：atom_code 一律 null、confidence 一律 "low"、match_path 一律 null；
-  bundle_members/bundle_fingerprint/split_method 本次不要输出该字段）
-- inspection: {name*, amount_per_pc*, note: 字符串|null, evidence}
-- packaging_transport: {name*, amount_per_pc*, item_type*: "包装"|"运输", note: 字符串|null, evidence}
-- sga_tax: {name*, amount_per_pc*, item_type*: "损耗"|"管理费"|"利润"|"税费"|"其他",
-  rate: 数字|null（费率小数，0.13=13%；税费条目必填）, note: 字符串|null, evidence}
-- other: {name*, amount_per_pc*, note*: 字符串（必填，说明这是什么费用）, evidence}
-
-evidence（每个条目必填）: {"file": 源文件名, "location": "sheet名!单元格范围"（如 "报价单!B9:C9"）, "raw_text": 原文片段}
-
-summary*: {untaxed_total: 数字|null, tax_amount: 数字|null, taxed_total: 数字|null,
-  discount: 数字|null, final_unit_price_taxed*: 数字, calc_check: "unchecked"}
-勾稽规则：未税合计 = Σ各模块合计（排除税费）；含税合计 = 未税合计 + 税额；最终含税单价 = 含税合计 − 折扣。
-按此规则计算并填 summary；算不准时 final_unit_price_taxed 必须给最优估计值。
-
-tooling: {total: 数字|null, molds/fixtures/stencils: {total: 数字|null, items: [
-  {name*, amount*, cavities: 整数|null（穴数）, lifespan: 数字|null（寿命模次）, note: 字符串|null, evidence}]}}
-模具→molds，治具/检具/夹具→fixtures，钢网/网板→stencils。"""
-
-_JSON_EXAMPLE = """输出示例（结构示意，字段以实际内容为准）：
-{"schema_version":"1.1","supplier":{"supplier_name":"XX公司","supplier_code":null},
-"basic":{"project_name":null,"part_name":"某零件","material_spec":null,"quote_date":"2026-09-01",
-"currency":"CNY","moq":null,"category":"CAT-WJWK","quote_no":null,"source_file":"报价单.xlsx","parse_status":"parsed"},
-"unit_price":{"materials":{"total":1.0,"items":[{"name":"铝材","amount_per_pc":1.0,"spec":null,"note":null,
-"evidence":{"file":"报价单.xlsx","location":"Sheet1!B2:C2","raw_text":"铝材 1.0"}}]},
-"processing":{"total":null,"items":[]},"inspection":{"total":null,"items":[]},
-"packaging_transport":{"total":null,"items":[]},"sga_tax":{"total":null,"items":[]},
-"other":{"total":null,"items":[]},
-"summary":{"untaxed_total":null,"tax_amount":null,"taxed_total":null,"discount":null,
-"final_unit_price_taxed":1.0,"calc_check":"unchecked"}},"tooling":null}"""
 
 
 class LLMValidateError(LLMUnavailable):
@@ -125,30 +83,43 @@ def _load_categories(conn: sqlite3.Connection | None) -> list[tuple[str, str]]:
 
 
 def _build_messages(ir: IR, categories: list[tuple[str, str]]) -> list[dict]:
+    """组装 LLM 消息：prompt 文本统一由 app.prompts 注册表维护
+    （constitution 宪法 + parse_quote 模板 + 创锋负例 fewshot 自动注入）。"""
     cat_lines = " / ".join(f"{code} {name}" for code, name in categories)
-    user = f"""{_SCHEMA_BRIEF}
+    return prompts.build_messages(
+        "parse_quote",
+        {"categories": cat_lines, "ir_serialized": _serialize_ir(ir)},
+    )
 
-品类判定：根据 part_name / material_spec / 报价内容判断零件所属品类，basic.category 填下方清单中的编码，都拿不准填 null：
-{cat_lines}
 
-报价单原文（IR 格式：sheet|行号|列号:值|列号:值...）：
-{_serialize_ir(ir)}
-
-只输出一个 JSON 对象，不要输出任何其他文字，不要用 markdown 代码块包裹。
-
-{_JSON_EXAMPLE}"""
-    return [
-        {"role": "system", "content": "你是采购报价单结构化解析助手，只输出 JSON。"},
-        {"role": "user", "content": user},
-    ]
+def _archive_self_check(parsed: Any) -> None:
+    """把每个 offer 顶层的 _self_check 摘下入档 offer["_derived"]["llm_self_check"]（不进 schema 校验）；
+    LLM 未输出 _self_check 时不报错，存档 null。"""
+    if not isinstance(parsed, dict):
+        return
+    for offer in parsed.get("offers") or []:
+        if isinstance(offer, dict):
+            offer.setdefault("_derived", {})["llm_self_check"] = offer.pop("_self_check", None)
 
 
 def _validate(data: Any) -> list[str]:
-    validator = Draft7Validator(load_schema())
-    errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
-    return [
-        f"$.{'.'.join(str(p) for p in e.absolute_path)}: {e.message}" for e in errors[:10]
-    ]
+    """先校验信封结构，再对每个 offer 用内层 schema 校验；错误带 offers[i] 路径前缀。"""
+    lines: list[str] = []
+    for e in sorted(
+        Draft7Validator(load_envelope_schema()).iter_errors(data),
+        key=lambda e: list(e.absolute_path),
+    ):
+        lines.append(f"$.{'.'.join(str(p) for p in e.absolute_path)}: {e.message}")
+    if not lines and isinstance(data, dict):
+        for i, offer in enumerate(data.get("offers") or []):
+            for e in sorted(
+                Draft7Validator(load_schema()).iter_errors(offer),
+                key=lambda e: list(e.absolute_path),
+            ):
+                lines.append(
+                    f"$.offers[{i}].{'.'.join(str(p) for p in e.absolute_path)}: {e.message}"
+                )
+    return lines[:10]
 
 
 def _strip_disallowed_nulls(node: Any, schema_node: dict | None) -> None:
@@ -210,11 +181,13 @@ def _script_classify(label: str, text: str) -> str | None:
     return None
 
 
-def _script_parse(ir: IR) -> tuple[dict, dict, dict]:
-    """脚本侧独立解析：返回 (行号→该行金额列表, 模块→明细和, 汇总标签→金额)。"""
+def _script_parse(ir: IR) -> tuple[dict, dict, dict, dict]:
+    """脚本侧独立解析：返回 (行号→该行金额列表, 模块→明细和, 汇总标签→金额, 行→(模块, 首个金额))。
+    行级归属供多 offer 场景按各 offer 自己的行范围对账模块合计。"""
     row_amounts: dict[tuple[str, int], list[float]] = {}
     module_sums: dict[str, float] = {m: 0.0 for m in (*MODULES, "tooling")}
     summary_seen: dict[str, float] = {}
+    row_module: dict[tuple[str, int], tuple[str, float]] = {}
     for t in ir.tables:
         cells = [c for c in t.cells if c.value is not None and c.value != ""]
         if not cells:
@@ -235,16 +208,17 @@ def _script_parse(ir: IR) -> tuple[dict, dict, dict]:
         if first_text.endswith("合计"):
             continue  # 合计行单独由模块 total 对账，不进明细和
         module_sums[section] = round(module_sums[section] + amount, 6)
-    return row_amounts, module_sums, summary_seen
+        row_module[(t.sheet, t.row_number)] = (section, amount)
+    return row_amounts, module_sums, summary_seen, row_module
 
 
-def _iter_amount_items(data: dict):
-    """产出 (层级路径, 金额字段名, item dict)，供行级对账。"""
-    up = data.get("unit_price") or {}
+def _iter_amount_items(offer: dict):
+    """产出 (层级路径, 金额字段名, item dict)，供行级对账。入参为单个 offer。"""
+    up = offer.get("unit_price") or {}
     for module in MODULES:
         for item in (up.get(module) or {}).get("items") or []:
             yield module, "amount_per_pc", item
-    tooling = data.get("tooling")
+    tooling = offer.get("tooling")
     if tooling:
         for key in ("molds", "fixtures", "stencils"):
             for item in (tooling.get(key) or {}).get("items") or []:
@@ -263,38 +237,66 @@ def _parse_location(location: str | None) -> tuple[str, int] | None:
 
 def cross_check(ir: IR | dict, data: dict) -> dict:
     """脚本侧独立对账：LLM 条目金额 vs IR 原文行金额；模块合计/summary 层级差异计入 total_conflicts。
+    data 为信封 {"offers": [...]}（兼容旧格式：无 offers 层的单个 quote 对象）。
 
     行级差异 > max(0.01, |值|×1%) 的条目加 _cross_check={"script_value":x,"llm_value":y}。
     返回 {"item_conflicts": n, "total_conflicts": [...]}。
     """
     if isinstance(ir, dict):
         ir = IR.from_dict(ir)
-    row_amounts, module_sums, summary_seen = _script_parse(ir)
-    up = data.get("unit_price") or {}
+    row_amounts, module_sums, summary_seen, row_module = _script_parse(ir)
+    offers = iter_offers(data)
 
     item_conflicts = 0
-    for module, amount_key, item in _iter_amount_items(data):
-        value = item.get(amount_key)
-        if value is None:
-            continue
-        loc = _parse_location((item.get("evidence") or {}).get("location"))
-        if loc is None:
-            continue
-        script_amounts = row_amounts.get(loc[0], []) if loc else []
-        # location 只带单行时允许跨 sheet 回退：按行号在所有 sheet 中找
-        if not script_amounts:
-            script_amounts = next(
-                (v for (sheet, row), v in row_amounts.items() if row == loc[1]), []
-            )
-        if not script_amounts:
-            continue
-        if any(abs(value - a) <= _tol(value) for a in script_amounts):
-            continue
-        script_value = min(script_amounts, key=lambda a: abs(a - value))
-        item["_cross_check"] = {"script_value": script_value, "llm_value": value}
-        item_conflicts += 1
+    for offer in offers:
+        for module, amount_key, item in _iter_amount_items(offer):
+            value = item.get(amount_key)
+            if value is None:
+                continue
+            loc = _parse_location((item.get("evidence") or {}).get("location"))
+            if loc is None:
+                continue
+            script_amounts = row_amounts.get(loc[0], []) if loc else []
+            # location 只带单行时允许跨 sheet 回退：按行号在所有 sheet 中找
+            if not script_amounts:
+                script_amounts = next(
+                    (v for (sheet, row), v in row_amounts.items() if row == loc[1]), []
+                )
+            if not script_amounts:
+                continue
+            if any(abs(value - a) <= _tol(value) for a in script_amounts):
+                continue
+            script_value = min(script_amounts, key=lambda a: abs(a - value))
+            item["_cross_check"] = {"script_value": script_value, "llm_value": value}
+            item_conflicts += 1
 
     total_conflicts: list[dict] = []
+    if len(offers) > 1:
+        # 多 offer：每个 offer 的模块合计只与自己条目所在行的脚本金额对账
+        #（全表聚合会把各方案/各产品行重复计入而误报）；summary 层级跳过，条目级对账已覆盖
+        for idx, offer in enumerate(offers):
+            up = offer.get("unit_price") or {}
+            for module in MODULES:
+                mod = up.get(module) or {}
+                total = mod.get("total")
+                if total is None:
+                    continue
+                rows: set[tuple[str | None, int]] = set()
+                for item in mod.get("items") or []:
+                    loc = _parse_location((item.get("evidence") or {}).get("location"))
+                    if loc is not None:
+                        rows.add(loc)
+                script_sum = round(
+                    sum(a for r, (m, a) in row_module.items() if r in rows and m == module), 6
+                )
+                if script_sum > 0 and script_sum > float(total) + _tol(float(total)):
+                    total_conflicts.append(
+                        {"level": "module_total", "offer": idx, "module": module,
+                         "script_value": script_sum, "llm_value": total}
+                    )
+        return {"item_conflicts": item_conflicts, "total_conflicts": total_conflicts}
+
+    up = offers[0].get("unit_price") or {}
     for module in MODULES:
         mod = up.get(module) or {}
         total = mod.get("total")
@@ -331,59 +333,94 @@ def cross_check(ir: IR | dict, data: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def parse_ir_with_llm_traced(
-    ir: IR | dict, *, conn: sqlite3.Connection | None = None, chat_fn=None
+    ir: IR | dict, *, conn: sqlite3.Connection | None = None, chat_fn=None, progress_cb=None
 ) -> tuple[dict, list[dict], dict]:
-    """LLM 版面理解，返回 (quote JSON, LLM 调用尝试记录, cross_check 结果)。
+    """LLM 版面理解，返回 (信封 JSON {"offers": [...]}, LLM 调用尝试记录, cross_check 结果)。
 
-    校验失败重试 1 次；仍失败抛 LLMValidateError（带 attempts 详情）。
+    每轮：调 LLM → 信封兼容处理 → _self_check 存档 → L0 Draft7 校验（失败先剥除
+    非法 null 重验一次）→ L0 通过再跑 L1 溯源校验（金额/坐标必须能在 evidence 与 IR
+    中找到出处）。重试上限 3 轮：schema 类错误按 schema_invalid 反馈、JSON 解析失败按
+    json_unparseable 反馈、L1 抽取错误（blame=A 且非 info 级）按 traceability 反馈；
+    第 3 轮仍失败抛 LLMValidateError（带 attempts 与最终问题清单）。
+    L1 通过（或仅 info 级）时返回，L2 勾稽问题（blame=B，只记录）写入 attempts
+    末条记录的 l2_issues 字段，供 parse_log 追溯、不打断流程。
+
+    progress_cb：可选进度回调，每次发起新一轮重试前调用一次，入参
+    {"round": 即将开始的轮次, "reason": 触发重试的原因摘要}（pipeline 用它写
+    layout/retry_round 进度日志）；回调异常被吞掉，绝不影响解析主流程。
     """
+    def _emit_retry(round_no: int, kind: str, errors: list[str]) -> None:
+        if progress_cb is None:
+            return
+        try:
+            reason = f"{kind}: {(errors[0] if errors else '')[:160]}"
+            progress_cb({"round": round_no + 1, "reason": reason})
+        except Exception:
+            pass
+
     if isinstance(ir, dict):
         ir = IR.from_dict(ir)
     fn = chat_fn or llm_client.chat_json
     categories = _load_categories(conn)
     messages = _build_messages(ir, categories)
+    prompt_version = prompts.get_prompt_version("parse_quote")
 
     attempts: list[dict] = []
     last_errors: list[str] = []
-    for round_no in (1, 2):
+    for round_no in range(1, MAX_ATTEMPTS + 1):
         try:
             parsed, usage = fn(messages)
         except LLMUnavailable:
             raise
         except LLMError as e:
             last_errors = [str(e)]
-            attempts.append({"round": round_no, "usage": None, "validation_errors": last_errors})
-            if round_no == 2:
-                break
-            messages = messages + [
-                {"role": "assistant", "content": "（上一次输出无法解析，见下方错误）"},
-                {"role": "user", "content": "上次输出有误，请修正后重新输出完整 JSON：\n" + "\n".join(last_errors)},
-            ]
+            attempts.append({"round": round_no, "usage": None,
+                             "validation_errors": last_errors, "l1_issues": None,
+                             "prompt_version": prompt_version})
+            if round_no < MAX_ATTEMPTS:
+                _emit_retry(round_no, "json_unparseable", last_errors)
+                messages = messages + prompts.build_retry_messages("json_unparseable", last_errors)
             continue
+        if isinstance(parsed, dict) and "offers" not in parsed and "unit_price" in parsed:
+            parsed = {"offers": [parsed]}  # 兼容旧格式：无信封层的单个 quote 对象
+        _archive_self_check(parsed)
         errors = _validate(parsed)
         if errors:
-            _strip_disallowed_nulls(parsed, load_schema())
+            for offer in parsed.get("offers") or []:
+                _strip_disallowed_nulls(offer, load_schema())
             errors = _validate(parsed)
-        attempts.append({"round": round_no, "usage": usage, "validation_errors": errors or None})
-        if not errors:
+        l1_issues = [
+            issue for issue in validate_l1_traceability(parsed, ir)
+            if issue.blame == "A" and issue.level != "info"
+        ] if not errors else []
+        attempts.append({"round": round_no, "usage": usage,
+                         "validation_errors": errors or None,
+                         "l1_issues": [issue.to_dict() for issue in l1_issues] or None,
+                         "prompt_version": prompt_version})
+        if not errors and not l1_issues:
+            l2_issues = validate_l2_reconcile(parsed)
+            attempts[-1]["l2_issues"] = [issue.to_dict() for issue in l2_issues] or None
             cross = cross_check(ir, parsed)
             return parsed, attempts, cross
-        last_errors = errors
-        if round_no == 1:
-            messages = messages + [
-                {"role": "assistant", "content": "（见下方校验错误）"},
-                {"role": "user", "content":
-                    "你的输出不符合 quote_schema v1.1，校验错误如下。请修正后重新输出完整 JSON（只输出 JSON）：\n"
-                    + "\n".join(errors)},
-            ]
+        if round_no == MAX_ATTEMPTS:
+            break
+        if errors:
+            last_errors = errors
+            _emit_retry(round_no, "schema_invalid", errors)
+            messages = messages + prompts.build_retry_messages("schema_invalid", errors)
+        else:
+            last_errors = [f"{issue.path}: {issue.issue}，{issue.detail}" for issue in l1_issues]
+            _emit_retry(round_no, "traceability", last_errors)
+            messages = messages + prompts.build_retry_messages("traceability", last_errors)
 
     raise LLMValidateError(
-        f"LLM 版面理解输出 2 次均不符合 quote_schema v1.1，最后错误：\n" + "\n".join(last_errors[:10]),
+        f"LLM 版面理解输出 {MAX_ATTEMPTS} 次均不符合 schema/溯源校验，最后错误：\n"
+        + "\n".join(last_errors[:10]),
         attempts,
     )
 
 
 def parse_ir_with_llm(ir: IR | dict, *, conn: sqlite3.Connection | None = None, chat_fn=None) -> dict:
-    """LLM 版面理解 → quote_schema v1.1 JSON（与 simple_excel_parse.parse_ir 输出同构）。"""
+    """LLM 版面理解 → 信封 JSON {"offers": [...]}，单个 offer 与 simple_excel_parse.parse_ir 输出同构。"""
     data, _attempts, _cross = parse_ir_with_llm_traced(ir, conn=conn, chat_fn=chat_fn)
     return data

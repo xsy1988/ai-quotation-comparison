@@ -9,7 +9,12 @@ interface Props {
 export default function FingerprintTable({ comparison }: Props) {
   const { fingerprint_groups, suppliers } = comparison
 
-  const byQuoteName = new Map(suppliers.map((s) => [s.quote_id, s.supplier_name]))
+  const byQuoteName = new Map(
+    suppliers.map((s) => [
+      s.quote_id,
+      [s.supplier_name, s.part_name, s.scheme].filter(Boolean).join(' · '),
+    ]),
+  )
 
   return (
     <>

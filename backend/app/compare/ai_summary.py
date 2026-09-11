@@ -19,6 +19,7 @@ import json
 import re
 import sqlite3
 
+from app import prompts
 from app.compare.compare_engine import get_comparison
 from app.llm import client as llm_client
 from app.llm.client import LLMError
@@ -30,26 +31,6 @@ _RE_MONEY_BEFORE = re.compile(rf"(?:¥|￥)\s*({_NUMBER})(?![\d.])")
 _RE_BARE_DECIMAL = re.compile(r"(?<![\d.])(\d+\.\d+)(?![\d.%])")  # 排除百分比
 
 _PROMPT_SIZE_LIMIT = 50_000
-
-_SYSTEM_PROMPT = (
-    "你是一名资深采购比价顾问，擅长解读多家供应商的零件报价对比结果。"
-    "你只依据输入的结构化对比数据作答，绝不臆造数字。"
-    "所有引用的金额必须直接来自输入数据，禁止自行计算或编造。"
-    "用中文输出，以 markdown 段落组织（可用标题、列表、表格）。"
-    "输出必须是 JSON：{\"markdown\": \"<综合建议全文>\"}。"
-)
-
-_USER_TEMPLATE = """以下是同一零件多家供应商报价的【结构化机械对比结果】（JSON）。
-请输出综合采购建议（markdown 正文放入 markdown 字段），必须覆盖：
-1. 推荐排序及理由（结合最终含税单价、各模块结构）；
-2. 主要差异解读（模块/抽屉维度的金额差距）；
-3. 异常提醒（引用 warnings 中的 flags 与行计数，如低置信、未匹配、新工艺候选、勾稽异常）；
-4. 议价抓手（哪家在哪项偏高、可压价点）；
-5. 数据质量声明：建议基于解析后的结构化对比结果生成，未核对原始报价文件，金额引用须与数据一致。
-
-【机械对比结果 JSON】
-{comparison}
-"""
 
 
 def _trim_comparison(comparison: dict) -> dict:
@@ -172,11 +153,9 @@ def generate_ai_summary(
     candidates = _candidates(comparison)
     chat = chat_fn or llm_client.chat_json
 
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": _USER_TEMPLATE.format(
-            comparison=json.dumps(payload, ensure_ascii=False))},
-    ]
+    messages = prompts.build_messages(
+        "ai_summary", {"comparison": json.dumps(payload, ensure_ascii=False)}
+    )
 
     markdown = None
     suspicious: list[dict] = []
@@ -192,7 +171,7 @@ def generate_ai_summary(
         elapsed_ms += usage.get("elapsed_ms") or 0
         _log_llm_call(conn, task_id, "generated" if round_no == 0 else "regenerated",
                       usage, round_no)
-        if not isinstance(parsed.get("markdown"), str) or not parsed["markdown"].strip():
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("markdown"), str) or not parsed["markdown"].strip():
             raise LLMError(
                 f"LLM 输出缺少 markdown 字段：{json.dumps(parsed, ensure_ascii=False)[:200]}"
             )

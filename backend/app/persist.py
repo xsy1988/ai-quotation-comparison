@@ -1,7 +1,8 @@
-"""落库（流水线段⑤）：quote_schema JSON → 校验 → 快照存档 → 拍平写关系表。
+"""落库（流水线段⑤）：quote_schema JSON → 派生重算 → 校验 → 快照存档 → 拍平写关系表。
 
 校验函数（calc_check/items_sum/module_total/validate_quote）已迁至 app.validate.validate，
-此处 re-export 保持旧引用兼容。
+此处 re-export 保持旧引用兼容。所有落库路径（流水线解析/查重复用/人工修正）均先经
+app.derive 确定性重算（幂等），派生发现的冲突合并进 quote.flags。
 """
 
 import json
@@ -9,9 +10,11 @@ from pathlib import Path
 import sqlite3
 
 from .db import get_connection, init_db
+from .derive import derive_offer
 from .validate.validate import (  # noqa: F401  (re-export)
     calc_check,
     items_sum,
+    load_envelope_schema,
     load_schema,
     module_total,
     validate_quote,
@@ -35,6 +38,26 @@ def find_quote_by_hash(conn: sqlite3.Connection, file_hash: str) -> int | None:
         "SELECT id FROM quote WHERE file_hash = ? ORDER BY id LIMIT 1", (file_hash,)
     ).fetchone()
     return row[0] if row else None
+
+
+def envelope_path(file_hash: str) -> Path:
+    return SNAPSHOT_DIR / f"envelope_{file_hash}.json"
+
+
+def save_envelope(file_hash: str, envelope: dict) -> str:
+    """信封（offers 列表）存档：同 hash 文件重复上传时直接复用，不重复解析。"""
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    path = envelope_path(file_hash)
+    path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+
+
+def load_envelope(file_hash: str) -> dict | None:
+    """查重复用：信封存在则返回（含 offers 列表），否则 None。"""
+    path = envelope_path(file_hash)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _insert_quote_lines(conn, quote_id: int, module: str, items: list[dict]) -> int:
@@ -94,7 +117,7 @@ def _insert_tooling_lines(conn, quote_id: int, tooling: dict | None) -> int:
 
 
 def collect_flags(data: dict, check: str) -> list[str]:
-    """校验徽标（只打标不阻断）：勾稽异常 / 低置信度 / 未匹配 / 新工艺候选。"""
+    """校验徽标（只打标不阻断）：勾稽异常 / 低置信度 / 未匹配 / 新工艺候选 / 派生冲突。"""
     flags: list[str] = []
     if check == "fail":
         flags.append("calc_abnormal")
@@ -107,7 +130,17 @@ def collect_flags(data: dict, check: str) -> list[str]:
         flags.append("new_process")
     if any(item.get("_cross_check") for item in processing_items):
         flags.append("cross_validation_conflict")
-    return flags
+    # derive 重算发现的冲突（模块 total/税费/final 与派生值不符，单据值保留）
+    derived = data.get("_derived") or {}
+    if derived.get("conflicts"):
+        flags.append("cross_validation_conflict")
+    if derived.get("shared_cells"):
+        flags.append("shared_cell")
+    # 共享单元格判不准（未置零，待人工核对）
+    if any(c.get("kind") == "shared_cell_ambiguous" for c in derived.get("conflicts") or []):
+        flags.append("calc_abnormal")
+    # 去重保持顺序稳定
+    return list(dict.fromkeys(flags))
 
 
 def persist_quote(
@@ -120,6 +153,8 @@ def persist_quote(
     """落库。传 task_id 则归属既有任务（不新建 comparison_task，任务状态由流水线更新）；
     传 file_hash 写入 quote.file_hash 供查重复用；
     传 quote_id 则回填流水线预建的占位行（UPDATE 而非 INSERT，行内明细先清后填）。"""
+    # ⓪ 派生重算（脚本确定性规则：模块 total/税费/summary；幂等，双跑无碍），冲突并入 flags
+    derive_offer(data)
     validate_quote(data)
     check = calc_check(data)
     flags = collect_flags(data, check)

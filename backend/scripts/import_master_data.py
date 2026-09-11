@@ -31,6 +31,13 @@ ALIAS_SPLIT_RE = re.compile(r"[/、]")
 TRAILING_ETC_RE = re.compile(r"\s*等$")
 CODE_RE = re.compile(r"^AT-([A-Z]+)-\d+$")
 
+# 已废弃的原子编码：源表仍保留，导入时过滤（业务决定：不再有"其它工艺"兜底项）
+REMOVED_CODES = {"AT-QT-001"}
+
+# 源表之外的补充别名（不改 xlsx 源表，重导入不丢；目标原子不存在时跳过。
+# 编码以 v2 清单为准；v4 导入时经合并映射解析到新编码，如 镭雕 AT-YS-027 → AT-YS-020）
+EXTRA_ALIASES: list[tuple[str, str]] = [("AT-YS-027", "镭雕破氧白")]
+
 
 def split_aliases(raw: str | None) -> list[str]:
     if not raw:
@@ -108,11 +115,12 @@ def main() -> None:
 
     for code, name, alias_raw, domain, stage, klass, cats_raw, remark in rows:
         code = str(code).strip()
+        if code in REMOVED_CODES:
+            continue
         name = str(name).strip()
         domain = str(domain).strip()
         stage = str(stage).strip()
         klass = str(klass).strip()
-        is_fallback = 1 if code == "AT-QT-001" else 0
 
         if domain not in domains:
             dc = domain_code_of(code)
@@ -122,7 +130,7 @@ def main() -> None:
 
         stages.add(stage)
         classes.add(klass)
-        atoms.append((code, name, domains[domain], stage, klass, remark, is_fallback))
+        atoms.append((code, name, domains[domain], stage, klass, remark))
 
         name_key = re.sub(r"\s+", "", name)
         for alias in split_aliases(alias_raw):
@@ -139,6 +147,11 @@ def main() -> None:
 
     if unknown_categories:
         raise SystemExit(f"常用品类列出现未知品类：{sorted(unknown_categories)}")
+
+    atom_codes = {a[0] for a in atoms}
+    for atom_code, alias in EXTRA_ALIASES:
+        if atom_code in atom_codes:
+            aliases.append((atom_code, alias))
 
     init_db()
     conn = get_connection()
@@ -161,8 +174,8 @@ def main() -> None:
             )
             conn.executemany(
                 """INSERT INTO atom
-                   (code, name, domain_code, stage_name, class_name, remark, is_fallback)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (code, name, domain_code, stage_name, class_name, remark)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
                 atoms,
             )
             conn.executemany(
@@ -204,8 +217,6 @@ def main() -> None:
         ]:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"{table:16s} {count}")
-        fallback = conn.execute("SELECT COUNT(*) FROM atom WHERE is_fallback=1").fetchone()[0]
-        print(f"兜底原子 is_fallback=1：{fallback}")
     finally:
         conn.close()
 

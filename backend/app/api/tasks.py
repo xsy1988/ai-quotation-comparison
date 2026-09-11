@@ -34,16 +34,30 @@ def _quote_progress(conn, task_id: int) -> list[dict]:
             "supplier_name": row["supplier_name"],
             "parse_status": row["parse_status"],
             "stage": row["stage"],
+            "action": row["action"],
+            "detail": _parse_log_detail(row["detail"]),
             "error": _quote_error(row),
         }
         for row in conn.execute(
             """SELECT q.id, q.supplier_name, q.parse_status, q.basic_info,
-                      (SELECT pl.stage FROM parse_log pl
-                        WHERE pl.quote_id = q.id ORDER BY pl.id DESC LIMIT 1) AS stage
-               FROM quote q WHERE q.task_id = ? ORDER BY q.id""",
+                      pl.stage AS stage, pl.action AS action, pl.detail AS detail
+               FROM quote q
+               LEFT JOIN parse_log pl ON pl.id = (
+                   SELECT MAX(pl2.id) FROM parse_log pl2 WHERE pl2.quote_id = q.id)
+               WHERE q.task_id = ? ORDER BY q.id""",
             (task_id,),
         )
     ]
+
+
+def _parse_log_detail(raw) -> dict | None:
+    """最近一条 parse_log 的 detail（JSON），供前端展示重试轮次等细节；非法 JSON 兜底 None。"""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 def _quote_error(row) -> str | None:

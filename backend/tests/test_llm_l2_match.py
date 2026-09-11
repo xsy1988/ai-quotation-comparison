@@ -50,7 +50,7 @@ def _category_candidates() -> list[str]:
         r[0]
         for r in conn.execute(
             """SELECT a.code FROM atom a JOIN atom_category ac ON a.code = ac.atom_code
-               WHERE ac.category_code = 'CAT-WJWK' AND a.is_fallback = 0 ORDER BY a.code"""
+               WHERE ac.category_code = 'CAT-WJWK' ORDER BY a.code"""
         )
     ]
     conn.close()
@@ -96,7 +96,7 @@ def test_l2_unique_match_and_fallback_new_process(quote_id, monkeypatch):
     assert edm["is_new_process"] == 0
 
     laser = _line(quote_id, "激光熔覆")
-    assert laser["atom_code"] == "AT-QT-001"
+    assert laser["atom_code"] is None
     assert laser["is_new_process"] == 1
     assert laser["confidence"] == "low"
     assert laser["match_path"] == "L2_llm"
@@ -105,15 +105,19 @@ def test_l2_unique_match_and_fallback_new_process(quote_id, monkeypatch):
     snap = _snapshot(quote_id)
     items = {i["name"]: i for i in snap["unit_price"]["processing"]["items"]}
     assert items["EDM"]["atom_code"] == code
-    assert items["激光熔覆"]["atom_code"] == "AT-QT-001"
+    assert items["激光熔覆"]["atom_code"] is None
     assert items["激光熔覆"]["is_new_process"] is True
 
     conn = get_connection()
     log = conn.execute(
         "SELECT detail FROM parse_log WHERE quote_id=? AND action='l2_llm_match'", (quote_id,)
     ).fetchone()
+    statuses = dict(conn.execute("SELECT term_text, status FROM unmatched_term").fetchall())
     conn.close()
     assert json.loads(log["detail"])["items"] == 2
+    # L2 唯一命中 → resolved；兜底新工艺不算匹配成功 → 保持 pending
+    assert statuses["EDM"] == "resolved"
+    assert statuses["激光熔覆"] == "pending"
 
 
 def test_l2_fabricated_code_goes_to_fallback(quote_id, monkeypatch):
@@ -127,7 +131,7 @@ def test_l2_fabricated_code_goes_to_fallback(quote_id, monkeypatch):
     assert stats["l2_new_process"] == 2
     for name in ("EDM", "激光熔覆"):
         line = _line(quote_id, name)
-        assert line["atom_code"] == "AT-QT-001"
+        assert line["atom_code"] is None
         assert line["is_new_process"] == 1
 
 
@@ -149,8 +153,15 @@ def test_l2_multi_code_bundle(quote_id, monkeypatch):
 
     items = {i["name"]: i for i in _snapshot(quote_id)["unit_price"]["processing"]["items"]}
     assert items["EDM"]["bundle_members"] == pair
-    assert items["EDM"]["split_method"] == "estimated"
+    assert items["EDM"]["split_method"] == "none"  # bundle 行不拆金额，假标记已移除
     assert items["EDM"]["bundle_flag"] is True
+
+    # bundle 匹配成功：L1 失败时登记的 unmatched_term 置 resolved（激光熔覆走兜底，仍 pending）
+    conn = get_connection()
+    statuses = dict(conn.execute("SELECT term_text, status FROM unmatched_term").fetchall())
+    conn.close()
+    assert statuses["EDM"] == "resolved"
+    assert statuses["激光熔覆"] == "pending"
 
 
 def test_l2_gateway_down_raises(quote_id):

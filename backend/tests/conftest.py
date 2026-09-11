@@ -23,3 +23,12 @@ def no_real_llm(monkeypatch):
 
     monkeypatch.setattr(llm_client, "chat_json", _blocked)
     yield
+
+
+@pytest.fixture(autouse=True)
+def verify_shadow_off_by_default(monkeypatch):
+    """测试默认关闭 LLM-B 影子复核（LLM_B_VERIFY=0），避免 verify 额外调用 chat_fn
+    干扰既有 pipeline 用例的 mock 调用计数；验证开关行为的用例自行覆盖本 fixture。
+    """
+    monkeypatch.setenv("LLM_B_VERIFY", "0")
+    yield

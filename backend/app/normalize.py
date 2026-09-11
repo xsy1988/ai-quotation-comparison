@@ -55,6 +55,38 @@ def normalize_amount(value: Any) -> float | None:
     return -amount if negative else amount
 
 
+def amount_strings(amount: float) -> set[str]:
+    """金额的可能文本写法（0.3 → {"0.3", "0.30"}），用于 evidence.raw_text 出处比对。"""
+    value = float(amount)
+    return {str(round(value, 6)), f"{value:.2f}", f"{value:g}"}
+
+
+def amount_occurrences(text: str | None, amount: float) -> int:
+    """金额写法在文本中的出现次数（词边界口径：命中位置前后不得再跟数字或小数点，
+    避免 "0" 误中 "13.0"、"0.30" 误中 "10.30" 这类子串误判）。"""
+    if not text:
+        return 0
+    count = 0
+    for candidate in amount_strings(amount):
+        start = 0
+        while True:
+            index = text.find(candidate, start)
+            if index < 0:
+                break
+            before = text[index - 1] if index > 0 else ""
+            after_index = index + len(candidate)
+            after = text[after_index] if after_index < len(text) else ""
+            if not (before.isdigit() or before == ".") and not (after.isdigit() or after == "."):
+                count += 1
+            start = index + 1
+    return count
+
+
+def amount_in_text(text: str | None, amount: float) -> bool:
+    """金额写法是否以词边界出现在文本中（出处比对口径，同 amount_occurrences）。"""
+    return amount_occurrences(text, amount) > 0
+
+
 def normalize_rate(value: Any) -> float | None:
     """费率文本 → 小数（"13%"→0.13，"0.13"→0.13）；无法解析返回 None。"""
     if value is None:

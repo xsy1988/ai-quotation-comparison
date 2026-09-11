@@ -1,0 +1,719 @@
+{
+  "source_file": "脱敏材料3.pdf",
+  "file_hash": "fa43752ff2e896d97d813121341903d35d626affe92bad97747efb733f7a64bb",
+  "file_type": "pdf",
+  "sheets": [
+    "page_1"
+  ],
+  "blocks": [],
+  "tables": [
+    {
+      "sheet": "page_1",
+      "row_number": 1,
+      "cells": [
+        {
+          "row": 1,
+          "col": 13,
+          "value": "電話：0752-2278715"
+        },
+        {
+          "row": 1,
+          "col": 14,
+          "value": "惠州市创锋科技有限公司"
+        },
+        {
+          "row": 1,
+          "col": 14,
+          "value": "地址：广东省惠州市惠城区小金口柏岗村尾一路14号"
+        },
+        {
+          "row": 1,
+          "col": 16,
+          "value": "傳真：0752-3083866"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 2,
+      "cells": [
+        {
+          "row": 2,
+          "col": 14,
+          "value": "报价单"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 3,
+      "cells": [
+        {
+          "row": 3,
+          "col": 1,
+          "value": "客户"
+        },
+        {
+          "row": 3,
+          "col": 3,
+          "value": "户："
+        },
+        {
+          "row": 3,
+          "col": 5,
+          "value": "爱奇迹技术有限公司"
+        },
+        {
+          "row": 3,
+          "col": 23,
+          "value": "项目："
+        },
+        {
+          "row": 3,
+          "col": 27,
+          "value": "F06外壳"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 4,
+      "cells": [
+        {
+          "row": 4,
+          "col": 1,
+          "value": "1"
+        },
+        {
+          "row": 4,
+          "col": 1,
+          "value": "项次"
+        },
+        {
+          "row": 4,
+          "col": 2,
+          "value": "联系人："
+        },
+        {
+          "row": 4,
+          "col": 2,
+          "value": "地址："
+        },
+        {
+          "row": 4,
+          "col": 3,
+          "value": "品名"
+        },
+        {
+          "row": 4,
+          "col": 3,
+          "value": "F06外壳"
+        },
+        {
+          "row": 4,
+          "col": 4,
+          "value": "料号"
+        },
+        {
+          "row": 4,
+          "col": 4,
+          "value": "/"
+        },
+        {
+          "row": 4,
+          "col": 6,
+          "value": "章工 电话：18621619641"
+        },
+        {
+          "row": 4,
+          "col": 6,
+          "value": "材质"
+        },
+        {
+          "row": 4,
+          "col": 6,
+          "value": "AL1070"
+        },
+        {
+          "row": 4,
+          "col": 7,
+          "value": "表面处理"
+        },
+        {
+          "row": 4,
+          "col": 7,
+          "value": "氧化"
+        },
+        {
+          "row": 4,
+          "col": 8,
+          "value": "币别"
+        },
+        {
+          "row": 4,
+          "col": 8,
+          "value": "RMB"
+        },
+        {
+          "row": 4,
+          "col": 8,
+          "value": "深圳市南山区华海金融创新中心A塔-爱奇迹技术有限公司-22层"
+        },
+        {
+          "row": 4,
+          "col": 9,
+          "value": "3.00"
+        },
+        {
+          "row": 4,
+          "col": 9,
+          "value": "材料"
+        },
+        {
+          "row": 4,
+          "col": 10,
+          "value": "拉伸"
+        },
+        {
+          "row": 4,
+          "col": 10,
+          "value": "1.40"
+        },
+        {
+          "row": 4,
+          "col": 11,
+          "value": "夹）"
+        },
+        {
+          "row": 4,
+          "col": 11,
+          "value": "1.95"
+        },
+        {
+          "row": 4,
+          "col": 11,
+          "value": "CNC"
+        },
+        {
+          "row": 4,
+          "col": 11,
+          "value": "(两"
+        },
+        {
+          "row": 4,
+          "col": 12,
+          "value": "粗抛"
+        },
+        {
+          "row": 4,
+          "col": 12,
+          "value": "0.90"
+        },
+        {
+          "row": 4,
+          "col": 13,
+          "value": "0.5"
+        },
+        {
+          "row": 4,
+          "col": 13,
+          "value": "精抛"
+        },
+        {
+          "row": 4,
+          "col": 14,
+          "value": "喷砂"
+        },
+        {
+          "row": 4,
+          "col": 14,
+          "value": "/预氧"
+        },
+        {
+          "row": 4,
+          "col": 14,
+          "value": "/"
+        },
+        {
+          "row": 4,
+          "col": 15,
+          "value": "倒角"
+        },
+        {
+          "row": 4,
+          "col": 15,
+          "value": "/"
+        },
+        {
+          "row": 4,
+          "col": 15,
+          "value": "高光"
+        },
+        {
+          "row": 4,
+          "col": 16,
+          "value": "1.50"
+        },
+        {
+          "row": 4,
+          "col": 16,
+          "value": "喷砂"
+        },
+        {
+          "row": 4,
+          "col": 16,
+          "value": "/氧化"
+        },
+        {
+          "row": 4,
+          "col": 17,
+          "value": "破氧"
+        },
+        {
+          "row": 4,
+          "col": 17,
+          "value": "白"
+        },
+        {
+          "row": 4,
+          "col": 17,
+          "value": "0.40"
+        },
+        {
+          "row": 4,
+          "col": 17,
+          "value": "镭雕"
+        },
+        {
+          "row": 4,
+          "col": 18,
+          "value": "0.30"
+        },
+        {
+          "row": 4,
+          "col": 18,
+          "value": "全检"
+        },
+        {
+          "row": 4,
+          "col": 20,
+          "value": "运输"
+        },
+        {
+          "row": 4,
+          "col": 20,
+          "value": "0.10"
+        },
+        {
+          "row": 4,
+          "col": 20,
+          "value": "包装"
+        },
+        {
+          "row": 4,
+          "col": 21,
+          "value": "不良率"
+        },
+        {
+          "row": 4,
+          "col": 21,
+          "value": "20%"
+        },
+        {
+          "row": 4,
+          "col": 21,
+          "value": "2.01"
+        },
+        {
+          "row": 4,
+          "col": 22,
+          "value": "管理"
+        },
+        {
+          "row": 4,
+          "col": 22,
+          "value": "10%"
+        },
+        {
+          "row": 4,
+          "col": 22,
+          "value": "1.21"
+        },
+        {
+          "row": 4,
+          "col": 23,
+          "value": "Date:"
+        },
+        {
+          "row": 4,
+          "col": 23,
+          "value": "5%"
+        },
+        {
+          "row": 4,
+          "col": 23,
+          "value": "0.66"
+        },
+        {
+          "row": 4,
+          "col": 23,
+          "value": "利润"
+        },
+        {
+          "row": 4,
+          "col": 24,
+          "value": "税率"
+        },
+        {
+          "row": 4,
+          "col": 24,
+          "value": "13%"
+        },
+        {
+          "row": 4,
+          "col": 24,
+          "value": "13.0%"
+        },
+        {
+          "row": 4,
+          "col": 25,
+          "value": "夹具费"
+        },
+        {
+          "row": 4,
+          "col": 25,
+          "value": "/元"
+        },
+        {
+          "row": 4,
+          "col": 25,
+          "value": "3500"
+        },
+        {
+          "row": 4,
+          "col": 26,
+          "value": "模具费"
+        },
+        {
+          "row": 4,
+          "col": 26,
+          "value": "/元"
+        },
+        {
+          "row": 4,
+          "col": 26,
+          "value": "65000"
+        },
+        {
+          "row": 4,
+          "col": 26,
+          "value": "2025/8/5"
+        },
+        {
+          "row": 4,
+          "col": 28,
+          "value": "含税价/"
+        },
+        {
+          "row": 4,
+          "col": 28,
+          "value": "元"
+        },
+        {
+          "row": 4,
+          "col": 28,
+          "value": "15.74"
+        },
+        {
+          "row": 4,
+          "col": 29,
+          "value": "备注"
+        },
+        {
+          "row": 4,
+          "col": 29,
+          "value": "3.0mm"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 5,
+      "cells": [
+        {
+          "row": 5,
+          "col": 1,
+          "value": "2"
+        },
+        {
+          "row": 5,
+          "col": 3,
+          "value": "F06外壳"
+        },
+        {
+          "row": 5,
+          "col": 4,
+          "value": "/"
+        },
+        {
+          "row": 5,
+          "col": 6,
+          "value": "AL1070"
+        },
+        {
+          "row": 5,
+          "col": 7,
+          "value": "氧化"
+        },
+        {
+          "row": 5,
+          "col": 8,
+          "value": "RMB"
+        },
+        {
+          "row": 5,
+          "col": 9,
+          "value": "2.40"
+        },
+        {
+          "row": 5,
+          "col": 10,
+          "value": "1.20"
+        },
+        {
+          "row": 5,
+          "col": 11,
+          "value": "1.85"
+        },
+        {
+          "row": 5,
+          "col": 12,
+          "value": "0.90"
+        },
+        {
+          "row": 5,
+          "col": 13,
+          "value": "0.5"
+        },
+        {
+          "row": 5,
+          "col": 14,
+          "value": "/"
+        },
+        {
+          "row": 5,
+          "col": 15,
+          "value": "/"
+        },
+        {
+          "row": 5,
+          "col": 16,
+          "value": "1.50"
+        },
+        {
+          "row": 5,
+          "col": 17,
+          "value": "0.40"
+        },
+        {
+          "row": 5,
+          "col": 18,
+          "value": "0.30"
+        },
+        {
+          "row": 5,
+          "col": 20,
+          "value": "0.10"
+        },
+        {
+          "row": 5,
+          "col": 21,
+          "value": "1.83"
+        },
+        {
+          "row": 5,
+          "col": 22,
+          "value": "1.10"
+        },
+        {
+          "row": 5,
+          "col": 23,
+          "value": "0.60"
+        },
+        {
+          "row": 5,
+          "col": 24,
+          "value": "13.0%"
+        },
+        {
+          "row": 5,
+          "col": 25,
+          "value": "3500"
+        },
+        {
+          "row": 5,
+          "col": 26,
+          "value": "65000"
+        },
+        {
+          "row": 5,
+          "col": 28,
+          "value": "14.33"
+        },
+        {
+          "row": 5,
+          "col": 29,
+          "value": "2.5mm"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 6,
+      "cells": [
+        {
+          "row": 6,
+          "col": 1,
+          "value": "3"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 7,
+      "cells": [
+        {
+          "row": 7,
+          "col": 1,
+          "value": "4"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 8,
+      "cells": [
+        {
+          "row": 8,
+          "col": 1,
+          "value": "5"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 9,
+      "cells": [
+        {
+          "row": 9,
+          "col": 1,
+          "value": "6"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 10,
+      "cells": [
+        {
+          "row": 10,
+          "col": 1,
+          "value": "7"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 11,
+      "cells": [
+        {
+          "row": 11,
+          "col": 3,
+          "value": "3.确认后请签回，谢谢！"
+        },
+        {
+          "row": 11,
+          "col": 5,
+          "value": "1. 以上报价含税13%，为每PCS的单价，不含备品损耗品。"
+        },
+        {
+          "row": 11,
+          "col": 7,
+          "value": "2. 月结30天，MOQ=20K，LT=30天，需满足MOQ，否则累积未交达到MOQ后开始计算L/T。"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 12,
+      "cells": [
+        {
+          "row": 12,
+          "col": 1,
+          "value": "备注："
+        },
+        {
+          "row": 12,
+          "col": 4,
+          "value": "1. 以上产品开模 以首期款付款日开始计算 30 天。"
+        },
+        {
+          "row": 12,
+          "col": 4,
+          "value": "3. HL50原材料厚度2.5mm~3.0mm需要定制，起订量2t"
+        },
+        {
+          "row": 12,
+          "col": 5,
+          "value": "2. 模具付款方式:2.1，合同签订50%; 交样确认后支付尾款50%"
+        },
+        {
+          "row": 12,
+          "col": 13,
+          "value": "2.2，如有产品设计变更，费用另行报价"
+        }
+      ]
+    },
+    {
+      "sheet": "page_1",
+      "row_number": 13,
+      "cells": [
+        {
+          "row": 13,
+          "col": 1,
+          "value": "确认"
+        },
+        {
+          "row": 13,
+          "col": 1,
+          "value": "客户"
+        },
+        {
+          "row": 13,
+          "col": 7,
+          "value": "核准"
+        },
+        {
+          "row": 13,
+          "col": 14,
+          "value": "审核"
+        },
+        {
+          "row": 13,
+          "col": 19,
+          "value": "深圳市创锋科技有限公司"
+        },
+        {
+          "row": 13,
+          "col": 23,
+          "value": "制表"
+        },
+        {
+          "row": 13,
+          "col": 26,
+          "value": "谭世界"
+        }
+      ]
+    }
+  ]
+}

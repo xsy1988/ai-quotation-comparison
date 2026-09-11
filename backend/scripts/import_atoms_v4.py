@@ -21,6 +21,8 @@ sys.path.insert(0, str(BACKEND_DIR / "scripts"))
 
 from app.db import get_connection, init_db  # noqa: E402
 from import_master_data import (  # noqa: E402
+    EXTRA_ALIASES,
+    REMOVED_CODES,
     domain_code_of,
     load_sheet,
     split_aliases,
@@ -75,6 +77,8 @@ def main() -> None:
         missing: dict[str, set[str]] = {"工艺域": set(), "工艺阶段": set(), "工艺类别": set(), "品类": set()}
         for code, name, alias_raw, domain, stage, klass, cats_raw, remark in rows:
             code = str(code).strip()
+            if code in REMOVED_CODES:
+                continue
             name = str(name).strip()
             domain = str(domain).strip()
             stage = str(stage).strip()
@@ -85,8 +89,7 @@ def main() -> None:
                 missing["工艺阶段"].add(stage)
             if klass not in db_classes:
                 missing["工艺类别"].add(klass)
-            is_fallback = 1 if code == "AT-QT-001" else 0
-            atoms.append((code, name, db_domains.get(domain, ""), stage, klass, remark, is_fallback))
+            atoms.append((code, name, db_domains.get(domain, ""), stage, klass, remark))
 
             name_key = re.sub(r"\s+", "", name)
             for alias in split_aliases(alias_raw):
@@ -118,14 +121,20 @@ def main() -> None:
                 add_alias(new_code, text)
                 alias_count_from_merge += len(aliases) - before
 
+        merged_code = {old_code: new_code for _, _, old_code, new_code in merge_rows}
+        for atom_code, alias in EXTRA_ALIASES:
+            target = merged_code.get(atom_code, atom_code)
+            if target in atom_name_by_code:
+                add_alias(target, alias)
+
         with conn:
             for table in CLEAR_TABLES:
                 conn.execute(f"DELETE FROM {table}")
 
             conn.executemany(
                 """INSERT INTO atom
-                   (code, name, domain_code, stage_name, class_name, remark, is_fallback)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (code, name, domain_code, stage_name, class_name, remark)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
                 atoms,
             )
             conn.executemany(
@@ -162,8 +171,6 @@ def main() -> None:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"{table:16s} {count}")
         print(f"其中合并映射贡献别名：{alias_count_from_merge}")
-        fallback = conn.execute("SELECT COUNT(*) FROM atom WHERE is_fallback=1").fetchone()[0]
-        print(f"兜底原子 is_fallback=1：{fallback}")
     finally:
         conn.close()
 

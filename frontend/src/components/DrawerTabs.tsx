@@ -1,4 +1,4 @@
-import { Empty, Table, Tabs, Tag } from 'antd'
+import { Empty, Table, Tabs } from 'antd'
 import type { Comparison, DrawerScope } from '../types'
 import Amount from './Amount'
 import { lookupValue } from './compareUtils'
@@ -38,17 +38,9 @@ export default function DrawerTabs({ comparison }: Props) {
                 dataIndex: 'group_name',
                 key: 'group_name',
                 width: 200,
-                render: (name: string, row) => (
-                  <span>
-                    {name}
-                    {row.is_fallback_bucket && (
-                      <Tag style={{ marginLeft: 6 }}>兜底桶</Tag>
-                    )}
-                  </span>
-                ),
               },
               ...suppliers.map((s) => ({
-                title: s.supplier_name,
+                title: [s.supplier_name, s.part_name, s.scheme].filter(Boolean).join(' · '),
                 key: `q${s.quote_id}`,
                 align: 'right' as const,
                 render: (_: unknown, row: (typeof drawer.groups)[number]) => (

@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "供应商报价单标准结构",
-  "description": "报价单解析的统一 Schema v1.1（2026-09-08）。LLM 解析输出、校验、对比均以本 JSON 为处理基准；落库时由此派生关系表记录。\n金额单位约定：unit_price 下所有明细与合计均为 元/pcs；tooling 下为 元/项（一次性费用）。\n全层级金额原则：每个费用模块都有 total 字段（模块合计），因为供应商可能只报模块总价而没有明细。total 与 items 可独立存在：有 total 无 items = 供应商打包报了模块价；有 items 无 total = 由明细汇总得出；两者都有时，模块合计应 ≥ 明细之和（合计中可能包含未逐项列出的内容），合计 < 明细之和判定为勾稽异常。对比取值优先级：total > Σitems。对比时逐层级看合计，按需展开明细（前端 +/− 折叠展开）。",
+  "description": "报价单解析的统一 Schema v1.1（2026-09-08）。LLM 解析输出、校验、对比均以本 JSON 为处理基准；落库时由此派生关系表记录。\n单份文件可能含多个产品/多个报价方案：LLM 输出为信封结构 {\"offers\": [本对象, ...]}（offers 按\"产品×方案\"拆分，普通报价单只有 1 个元素）；本 schema 描述的是单个 offer（一份完整报价）。信封结构由校验代码程序化包装，不在本文件重复定义。\n金额单位约定：unit_price 下所有明细与合计均为 元/pcs；tooling 下为 元/项（一次性费用）。\n全层级金额原则：每个费用模块都有 total 字段（模块合计），因为供应商可能只报模块总价而没有明细。total 与 items 可独立存在：有 total 无 items = 供应商打包报了模块价；有 items 无 total = 由明细汇总得出；两者都有时，模块合计应 ≥ 明细之和（合计中可能包含未逐项列出的内容），合计 < 明细之和判定为勾稽异常。对比取值优先级：total > Σitems。对比时逐层级看合计，按需展开明细（前端 +/− 折叠展开）。",
   "type": "object",
   "required": ["schema_version", "supplier", "basic", "unit_price"],
   "properties": {
@@ -22,6 +22,7 @@
       "properties": {
         "project_name":  { "type": ["string", "null"] },
         "part_name":     { "type": "string", "description": "零件名称" },
+        "scheme":        { "type": ["string", "null"], "description": "报价方案标识：同一产品多方案报价时区分各方案（取自原表方案列/品名/备注或工艺路线简述，如\"方案1\"）；单方案为 null" },
         "material_spec": { "type": ["string", "null"], "description": "材料规格（原文）" },
         "quote_date":    { "type": ["string", "null"], "format": "date" },
         "currency":      { "type": "string", "enum": ["CNY", "USD", "EUR", "JPY", "HKD", "TWD", "KRW", "OTHER"] },
@@ -76,7 +77,7 @@
                 "properties": {
                   "name":               { "type": "string", "description": "供应商原文名称" },
                   "amount_per_pc":      { "type": "number", "description": "元/pcs" },
-                  "atom_code":          { "type": ["string", "null"], "description": "命中的原子编码；工艺不在清单中时用兜底编码 AT-QT-001（其它工艺）；完全无法判断为 null" },
+                  "atom_code":          { "type": ["string", "null"], "description": "命中的原子编码；工艺不在清单中（is_new_process=true）或完全无法判断时为 null" },
                   "is_new_process":     { "type": "boolean", "default": false, "description": "LLM 判定为清单外的新工艺时置 true，触发新工艺上报流程（前端询问是否新增原子）" },
                   "bundle_flag":        { "type": "boolean", "default": false },
                   "bundle_members":     { "type": "array", "items": { "type": "string" }, "description": "打包项的原子编码列表；单项时为 [atom_code]" },

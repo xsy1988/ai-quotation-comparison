@@ -2,8 +2,12 @@
 
 OCR 走 LLM 网关 vision 模型（qwen3.5-ocr），失败上抛不降级（用户政策：不降级，中止并反馈）。
 扫描版 PDF 由 pypdfium2 按页渲染为 PNG（200 DPI）后逐页 OCR，sheet 记为 page_N。
-OCR 输出要求与版面理解的 IR 行格式一致（sheet|行号|列号:值|...），sheet 固定 "ocr"，
-因此 layout_understand 的 _serialize_ir / prompt 无需任何改动。
+qwen3.5-ocr 是专用 OCR 模型，输出契约为原生 {"lines": [{"rotate_rect": [...], "text": ...}]}
+（提示词要求的管道格式拿不到、且要求管道格式时表格单元格会被漏检），因此提示词直接对齐原生
+契约，脚本侧聚类成 IR 行（sheet|行号|列号:值|...）；模型若直接返回管道字符串也兼容。
+聚类前先把窄列竖排表头碎片（同 x 区间、上下紧贴的非数值文本，如"镭雕/破氧/白"）合并为完整
+列名条目；行聚类按锚定行高（≤中位行高）截断，高表头单元格不会把下方数据行链进同一行。
+IR 行格式与版面理解序列化一致，layout_understand 的 prompt 无需任何改动。
 """
 
 import base64
@@ -17,27 +21,39 @@ import pypdfium2 as pdfium
 from docx import Document
 
 from .ir import CellValue, IR, TableRow, TextBlock
+from .prompts import get_prompt
 
 OCR_MODEL = "qwen3.5-ocr"
-
-_OCR_PROMPT = """你是报价单 OCR 转写助手。请只转写图片中的报价单内容，按以下 IR 行格式输出，每行一条记录：
-
-sheet|行号|列号:值|列号:值...
-
-规则：
-1. sheet 固定为 "ocr"；行号从 1 开始按视觉行从上到下递增；列号按视觉列从左到右从 1 开始编号。
-2. 只转写报价单中的文字与数字，金额保持数字原文（如 4.50、25000），不要换算、不要补全看不见的内容。
-3. 一行视觉记录对应一行输出；该行没有值的列直接跳过。
-4. 不要输出任何其他文字、解释或 markdown。
-
-把全部 IR 行放进 JSON 的 lines 字段（字符串，行间用 \\n 分隔），只输出这个 JSON 对象：
-{"lines": "ocr|1|1:供应商报价单\\nocr|2|1:供应商|2:XX公司"}"""
 
 # 兼容网关忽略 response_format 时返回的裸 IR 行文本
 _IR_LINE_RE = re.compile(
     r"^(?P<sheet>[A-Za-z0-9_\u4e00-\u9fff]+)\|(?P<row>\d+)\|(?P<cells>.*)$"
 )
 _CELL_RE = re.compile(r"^(?P<col>\d+):(?P<value>.*)$")
+
+
+_CJK_RE = re.compile(r"[一-鿿]")
+
+
+def _join_fragments(parts) -> str:
+    """碎片拼接为完整文本：CJK 边界直接相连（"破氧"+"白"→"破氧白"），拉丁边界补空格。"""
+    out = ""
+    for part in parts:
+        part = str(part).strip()
+        if not part:
+            continue
+        if out and not (_CJK_RE.search(out[-1]) or _CJK_RE.search(part[0])):
+            out += " "
+        out += part
+    return out
+
+
+def _join_cell_lines(text) -> str:
+    """单元格内换行合并为完整文本（pdfplumber 多行表头 "镭雕\n破氧\n白" → "镭雕破氧白"）。
+
+    换行符若带进 IR 会在 sheet|行号|列号:值 序列化中把一行拆成多行孤儿文本，必须在此消除。
+    """
+    return _join_fragments(str(text).splitlines())
 
 
 def docx_to_ir(path: Path, file_hash: str) -> IR:
@@ -88,7 +104,7 @@ def pdf_to_ir(path: Path, file_hash: str, chat_fn=None) -> IR:
                     rows_added = 0
                     for r_idx, row in enumerate(table, start=1):
                         cells = [
-                            CellValue(row=r_idx, col=c_idx, value=str(v).strip())
+                            CellValue(row=r_idx, col=c_idx, value=_join_cell_lines(v))
                             for c_idx, v in enumerate(row, start=1)
                             if v is not None and str(v).strip()
                         ]
@@ -134,14 +150,117 @@ def _render_pdf_page_b64(pdf: "pdfium.PdfDocument", index: int, error_cls) -> st
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _decode_ocr_lines(parsed: dict) -> str:
-    """从 chat_json 返回的 JSON dict 取 lines；兼容网关忽略 response_format 的退化形态。
+# 数值类文本不参与竖排碎片合并：避免表头碎片链吞下数据行的金额（如"白"+"0.40"）
+_NUMERIC_GUARD_RE = re.compile(r"[0-9.%]")
 
-    优先 parsed["lines"]；其次把 dict 里第一个字符串值当 lines（嵌套 JSON 字符串再解一次）。
+
+def _merge_stacked_fragments(entries: list) -> list:
+    """窄列竖排换行单元格的碎片合并：x 区间重叠、上下紧贴、均为非数值文本的相邻条目
+    按从上到下拼接为完整列名单元（"镭雕"/"破氧"/"白" → "镭雕破氧白"），框取外接矩形。
+
+    entries 为 (x, y, h, w, text)。数值守卫（含数字/% 不合并）保证数据行金额不会被并进来。
     """
+    merged: list = []
+    for e in sorted(entries, key=lambda it: (it[0], it[1])):
+        x, y, h, w, text = e
+        if merged:
+            px, py, ph, pw, ptext = merged[-1]
+            v_gap = y - (py + ph)
+            x_overlap = min(px + pw, x + w) - max(px, x)
+            if (
+                not _NUMERIC_GUARD_RE.search(ptext + text)
+                and -0.3 * min(ph, h) <= v_gap <= max(2.0, 0.3 * min(ph, h))
+                and x_overlap >= 0.6 * min(pw, w)
+            ):
+                merged[-1] = (
+                    min(px, x), py, (y + h) - py,
+                    max(px + pw, x + w) - min(px, x),
+                    _join_fragments([ptext, text]),
+                )
+                continue
+        merged.append(e)
+    return merged
+
+
+def _cluster_native_lines(items: list) -> str:
+    """qwen3.5-ocr 原生输出（rotate_rect/text 条目）聚类成视觉行，展开为 IR 行文本。
+
+    OCR 专用模型的输出契约不受提示词约束：提示词要求的管道格式拿不到，模型固定返回
+    {"lines": [{"rotate_rect": [x, y, h, w, angle], "text": ...}]}（裸 JSON 数组也可能），
+    且 angle 恒为 90°——按未旋转框理解：x/y 为左上角，第三、四分量是文本高/宽。
+    这里脚本侧确定性转换，不追加 LLM 调用。
+    先合并竖排表头碎片（_merge_stacked_fragments）；行聚类以行首条目为锚、
+    接受窗高封顶为中位行高（y 区间重叠容差 gap），多行高表头单元格不会把下方
+    数据行链进同一视觉行，长文本行也不会因框高被并入邻行。
+    """
+    entries = []
+    for it in items:
+        if not isinstance(it, dict) or not isinstance(it.get("text"), str):
+            continue
+        rect = it.get("rotate_rect") or it.get("bbox") or []
+        if isinstance(rect, (list, tuple)) and len(rect) >= 4:
+            x, y, h, w = float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3])
+        else:
+            x, y, h, w = 0.0, float(len(entries)), 10.0, 10.0
+        text = _join_cell_lines(it["text"])
+        if not text:
+            continue
+        entries.append((x, y, h, w, text))
+    if not entries:
+        raise ValueError("OCR 原生 lines 中没有可用文本")
+    entries = _merge_stacked_fragments(entries)
+    heights = sorted(e[2] for e in entries)
+    median_h = heights[len(heights) // 2]
+    gap = max(4.0, 0.3 * median_h)
+    entries.sort(key=lambda e: e[1])
+    rows: list = []  # [y_start, accept_until, [entries]]
+    for e in entries:
+        if rows and e[1] <= rows[-1][1]:
+            rows[-1][2].append(e)
+        else:
+            # 锚定接受窗：行首条目顶部 + min(自身框高, 中位行高) + gap。
+            # 不用运行最大值 y_end，避免竖排/多行高表头单元格逐段链式吞并下方数据行。
+            rows.append([e[1], e[1] + min(e[2], median_h) + gap, [e]])
+
+    # 全局列聚类：所有条目的 x 左缘按间距聚成统一列号。
+    # 表头两行堆叠的单元格（如"脱墨/氧化"）由此与表体同列对齐，避免版面 LLM 对错列。
+    col_gap = max(10.0, 0.6 * median_h)
+    col_reps: list[float] = []
+    for x in sorted(e[0] for e in entries):
+        if col_reps and x - col_reps[-1] <= col_gap:
+            col_reps[-1] = (col_reps[-1] + x) / 2
+        else:
+            col_reps.append(x)
+
+    def col_no(x: float) -> int:
+        return min(range(len(col_reps)), key=lambda i: abs(col_reps[i] - x)) + 1
+
+    out_lines = []
+    for row_no, (_, _, cells) in enumerate(rows, start=1):
+        cells.sort(key=lambda e: (e[1], e[0]))  # 阅读顺序：先上后下、同行从左到右
+        by_col: dict[int, list] = {}
+        for e in cells:
+            by_col.setdefault(col_no(e[0]), []).append(e[4])
+        # 列量化后仍同列的碎片按阅读顺序拼回一个单元格（同一逻辑列，不拆成伪列）
+        parts = [f"{c}:{_join_fragments(by_col[c])}" for c in sorted(by_col)]
+        out_lines.append(f"ocr|{row_no}|" + "|".join(parts))
+    return "\n".join(out_lines)
+
+
+def _decode_ocr_lines(parsed: dict | list) -> str:
+    """从 chat_json 返回的 JSON 取 lines；兼容各类退化形态。
+
+    优先 parsed["lines"] 字符串（提示词要求的管道格式）；其次是 OCR 模型原生
+    lines 数组（rotate_rect/text，或顶层就是条目数组），聚类转为管道格式；
+    最后把 dict 里第一个字符串值当 lines（嵌套 JSON 字符串再解一次）。
+    """
+    if isinstance(parsed, list):
+        return _cluster_native_lines(parsed)
     lines = parsed.get("lines")
     if isinstance(lines, str):
         return lines
+    if isinstance(lines, list):
+        return _cluster_native_lines(lines)
     for value in parsed.values():
         if isinstance(value, str):
             try:
@@ -194,7 +313,7 @@ def _ocr_image_b64(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": _OCR_PROMPT},
+                {"type": "text", "text": get_prompt("ocr_transcribe")},
                 {"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{b64}"}},
             ],
         }
