@@ -32,7 +32,9 @@ import type {
   TaskListItem,
 } from '../types'
 
-const baseURL = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8002'
+// 默认同源相对路径：经 vite dev server 的 /api 代理打后端，
+// 本机、局域网 IP、域名访问都能用（直连时用 VITE_API_BASE 指定绝对地址）
+const baseURL = import.meta.env.VITE_API_BASE || ''
 
 export const http = axios.create({ baseURL, timeout: 30000 })
 

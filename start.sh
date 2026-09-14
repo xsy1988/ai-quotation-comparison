@@ -7,6 +7,7 @@ LOG_DIR="$ROOT/logs"
 
 API_ONLY=0
 WEB_ONLY=0
+LOCAL_ONLY=0
 DO_INSTALL=1
 RELOAD=0
 API_PORT=""
@@ -17,6 +18,8 @@ usage() {
 用法：./start.sh [选项]
 
   无参数              启动后端 + 前端（Ctrl+C 一起停止）
+                      前端监听 0.0.0.0，同一网络的其它电脑/手机可用本机 IP 访问
+  --local             仅本机可访问（前端只监听 127.0.0.1）
   --reload            后端热重载（改后端代码自动重启）
   --no-install        跳过依赖安装检查
   --api-only          只启动后端
@@ -27,6 +30,8 @@ usage() {
 
 端口默认读 backend/.env 的 HOST/PORT 与 frontend/.env 的 VITE_PORT；
 日志同时打印到终端（前缀 [api] / [web]）并落盘到 logs/backend.log、logs/frontend.log。
+远程访问：前端请求同源的 /api，由 dev server 代理到后端，所以别人只需访问
+  http://<本机局域网IP>:<前端端口>/  即可，后端始终只监听 127.0.0.1，无需对外开放。
 EOF
 }
 
@@ -34,6 +39,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --api-only) API_ONLY=1 ;;
     --web-only) WEB_ONLY=1 ;;
+    --local) LOCAL_ONLY=1 ;;
     --no-install) DO_INSTALL=0 ;;
     --reload) RELOAD=1 ;;
     --api-port)
@@ -71,6 +77,21 @@ die() { printf '%s✗ %s%s\n' "$C_ERR" "$*" "$C_RESET" >&2; exit 1; }
 env_value() {
   if [ ! -f "$1" ]; then return 0; fi
   sed -n "s/^[[:space:]]*$2=//p" "$1" | head -n 1 | sed "s/^[\"']//; s/[\"']\$//"
+}
+
+# 取本机局域网 IPv4（macOS：优先 en0，其次默认路由网卡；Linux：hostname -I 兜底）
+lan_ip() {
+  for iface in en0 en1 en2; do
+    ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+    if [ -n "$ip" ]; then printf '%s' "$ip"; return 0; fi
+  done
+  iface="$(route -n get default 2>/dev/null | sed -n 's/.*interface: //p' || true)"
+  if [ -n "$iface" ]; then
+    ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+    if [ -n "$ip" ]; then printf '%s' "$ip"; return 0; fi
+  fi
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  printf '%s' "$ip"
 }
 
 # ---- 前置检查 ----
@@ -132,14 +153,30 @@ if [ "$DO_INSTALL" = 1 ]; then
   fi
 fi
 
-# ---- 前端访问后端地址（端口改了前端要跟着改）----
-if [ -z "${VITE_API_BASE:-}" ]; then
-  VITE_API_BASE="http://$API_ADDR:$API_PORT"
-  env_base="$(env_value "$ROOT/frontend/.env" VITE_API_BASE)"
-  if [ -n "$env_base" ] && [ "$env_base" != "$VITE_API_BASE" ]; then
-    info "→ 前端 API 地址按本次后端端口取 ${VITE_API_BASE}（frontend/.env 写的是 ${env_base}；要自定义请设环境变量 VITE_API_BASE）"
-  fi
+# ---- 前端访问后端 ----
+# 默认同源：前端请求相对路径 /api，由 vite dev server 代理到后端。
+# 这样从 127.0.0.1、局域网 IP、域名访问都可用，不写死 IP、也没有跨域问题。
+export VITE_API_PORT="$API_PORT"
+# 只有 --local 时才限制成本机可访问
+if [ "$LOCAL_ONLY" = 1 ]; then export VITE_HOST="127.0.0.1"; else export VITE_HOST="0.0.0.0"; fi
+env_base="$(env_value "$ROOT/frontend/.env" VITE_API_BASE)"
+if [ -n "${VITE_API_BASE:-}" ]; then
+  info "→ 前端直连后端 ${VITE_API_BASE}（由环境变量 VITE_API_BASE 指定）"
+elif [ -n "$env_base" ]; then
+  case "$env_base" in
+    # 环回地址只有「打开页面那台机器」能用，跨机访问会打到对方自己的本机 → 改走同源代理
+    http://127.0.0.1:*|http://localhost:*|http://0.0.0.0:*)
+      info "→ 前端改用 dev server 代理 /api → 127.0.0.1:${API_PORT}（frontend/.env 里的 ${env_base} 仅本机可用，别人打开页面会失效）"
+      ;;
+    *)
+      VITE_API_BASE="$env_base"
+      info "→ 前端直连后端 ${VITE_API_BASE}（取自 frontend/.env）"
+      ;;
+  esac
 fi
+# 显式导出（空串即同源代理）：Vite 的 process.env 优先于 frontend/.env，
+# 否则别人打开页面时仍会用 .env 里写死的 127.0.0.1
+VITE_API_BASE="${VITE_API_BASE:-}"
 export VITE_API_BASE
 # vite.config.ts 只读 process.env.VITE_PORT，不读 frontend/.env，所以这里必须显式导出
 export VITE_PORT="$WEB_PORT"
@@ -210,7 +247,11 @@ if [ "$WEB_ONLY" = 0 ]; then
 fi
 
 if [ "$API_ONLY" = 0 ]; then
-  info "→ 启动前端：vite dev server @ ${WEB_PORT}（API ${VITE_API_BASE}）"
+  if [ -n "$VITE_API_BASE" ]; then
+    info "→ 启动前端：vite dev server @ ${WEB_PORT}（API 直连 ${VITE_API_BASE}）"
+  else
+    info "→ 启动前端：vite dev server @ ${WEB_PORT}（API 同源代理 → 127.0.0.1:${API_PORT}）"
+  fi
   # --strictPort：端口被占用时直接报错退出，避免 vite 静默换端口导致提示的地址不对
   (cd "$ROOT/frontend" && exec pnpm dev --strictPort 3>&-) \
     > >( { exec 2>/dev/null; awk -v p="${C_WEB}[web]${C_RESET}" '{ print p " " $0; fflush() }' | tee "$LOG_DIR/frontend.log" 2>&3; } ) 2>&1 &
@@ -263,6 +304,14 @@ printf '\n'
 ok "启动完成"
 printf '\n'
 if [ -n "$WEB_PID" ]; then info "  前端页面   http://127.0.0.1:${WEB_PORT}/"; fi
+if [ -n "$WEB_PID" ] && [ "$LOCAL_ONLY" = 0 ]; then
+  share_ip="$(lan_ip)"
+  if [ -n "$share_ip" ]; then
+    info "  共享访问   http://${share_ip}:${WEB_PORT}/   ← 发给同事，同一网络即可打开"
+  else
+    info "  共享访问   未检测到局域网 IP（查本机 IP：ipconfig getifaddr en0）"
+  fi
+fi
 if [ -n "$API_PID" ]; then info "  后端接口   http://${API_ADDR}:${API_PORT}/docs"; fi
 if [ -n "$API_PID" ] && [ -n "$WEB_PID" ]; then
   info "  日志       logs/backend.log  logs/frontend.log"
