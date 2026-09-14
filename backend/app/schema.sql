@@ -270,3 +270,19 @@ CREATE TABLE IF NOT EXISTS source_file (
     ir_path       TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+
+-- 对象存储登记：每次上传/接入各留一条（同一内容多次上传共用一份字节，文件名按次留存）
+CREATE TABLE IF NOT EXISTS stored_object (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha256        TEXT NOT NULL,
+    object_key    TEXT NOT NULL,          -- 内容寻址 key：objects/<sha[:2]>/<sha><ext>
+    backend       TEXT NOT NULL DEFAULT 'local',
+    size_bytes    INTEGER,
+    content_type  TEXT,
+    original_name TEXT NOT NULL,          -- 源文件名称（上传时用户给的名字）
+    task_id       INTEGER REFERENCES comparison_task(id),
+    quote_id      INTEGER REFERENCES quote(id),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_stored_object_quote ON stored_object(quote_id);
+CREATE INDEX IF NOT EXISTS idx_stored_object_sha ON stored_object(sha256);

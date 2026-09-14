@@ -51,6 +51,17 @@ class Settings:
         """SQLite 库文件路径覆盖；None 时用默认 backend/data/quotes.db。"""
         return os.environ.get("QUOTES_DB_PATH") or None
 
+    @property
+    def object_store_backend(self) -> str:
+        """对象存储后端：local（默认，本地文件系统）/ s3（预留，需装 boto3 后补实现）。"""
+        return (os.environ.get("OBJECT_STORE_BACKEND") or "local").strip().lower()
+
+    @property
+    def object_store_dir(self) -> Path:
+        """本地对象存储根目录。"""
+        raw = os.environ.get("OBJECT_STORE_DIR")
+        return Path(raw) if raw else BACKEND_DIR / "data" / "object_store"
+
     # --- 流水线 ---
     @property
     def parse_concurrency(self) -> int:

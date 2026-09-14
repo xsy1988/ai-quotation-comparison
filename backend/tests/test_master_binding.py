@@ -353,6 +353,64 @@ def test_supplier_history_filters(seeded):
     assert by_category["filtered_count"] == 1
 
 
+def _seed_process(conn, quote_id, atoms):
+    """给报价单挂工艺明细：atoms = [(domain, 域名, code, 名称), ...]。"""
+    with conn:
+        for domain, domain_name, code, name in atoms:
+            conn.execute(
+                "INSERT OR IGNORE INTO process_domain (code, name) VALUES (?, ?)", (domain, domain_name)
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO process_stage (name) VALUES ('机加工')",
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO process_class (name) VALUES ('成型')",
+            )
+            conn.execute(
+                "INSERT INTO atom (code, name, domain_code, stage_name, class_name)"
+                " VALUES (?, ?, ?, '机加工', '成型')",
+                (code, name, domain),
+            )
+            conn.execute(
+                "INSERT INTO quote_line (quote_id, module, item_name, amount, atom_code)"
+                " VALUES (?, 'processing', ?, 1.0, ?)",
+                (quote_id, name, code),
+            )
+
+
+def test_supplier_history_process_filter(seeded):
+    """工艺域 / 原子工艺按报价级过滤：只保留命中工艺的报价单，选项只列真实出现过的工艺。"""
+    client.post("/api/master/suppliers/register", json={"name": "东莞市鸿图精密压铸有限公司"})
+    conn = get_connection()
+    _seed_process(conn, seeded["a1"], [("QX", "成型加工", "AT-QX-001", "CNC加工")])
+    _seed_process(conn, seeded["a2"], [("ZH", "表面处理", "AT-ZH-013", "阳极氧化")])
+    conn.close()
+
+    body = client.get("/api/suppliers/SUP-001/history").json()
+    assert body["domain_options"] == [{"code": "QX", "name": "成型加工", "quote_count": 1},
+                                      {"code": "ZH", "name": "表面处理", "quote_count": 1}]
+    assert [o["code"] for o in body["atom_options"]] == ["AT-QX-001", "AT-ZH-013"]
+    assert body["atom_options"][0]["domain_code"] == "QX"
+    # 未筛选时每点回填全部命中工艺
+    assert body["points"][0]["matched_atoms"] == [{"code": "AT-QX-001", "name": "CNC加工"}]
+    assert body["points"][0]["matched_domains"] == [{"code": "QX", "name": "成型加工"}]
+
+    by_domain = client.get("/api/suppliers/SUP-001/history", params={"domain_codes": "QX"}).json()
+    assert [p["quote_id"] for p in by_domain["points"]] == [seeded["a1"]]
+    assert by_domain["process_filter"] == {"domain_codes": ["QX"], "atom_codes": []}
+    assert by_domain["filtered_count"] == 1
+
+    by_atom = client.get("/api/suppliers/SUP-001/history", params={"atom_codes": "AT-ZH-013"}).json()
+    assert [p["quote_id"] for p in by_atom["points"]] == [seeded["a2"]]
+    # 多选：域与原子取交集（同一条 EXISTS，域 AND 原子）
+    both = client.get(
+        "/api/suppliers/SUP-001/history", params={"domain_codes": "QX", "atom_codes": "AT-ZH-013"}
+    ).json()
+    assert both["points"] == []
+    # 没挂工艺的报价单被筛掉，但总数口径不变
+    assert both["quote_count"] == 2
+
+
 def test_supplier_history_invalid_params(seeded):
     client.post("/api/master/suppliers/register", json={"name": "深圳锐进"})
     assert client.get("/api/suppliers/SUP-404/history").status_code == 404

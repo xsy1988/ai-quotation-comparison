@@ -31,6 +31,7 @@ from app.pipeline.layout_understand import parse_ir_with_llm_traced
 from app.pipeline.mapping_runner import run_mapping
 from app.pipeline.simple_excel_parse import ParseError
 from app.pipeline.verify_runner import run_verify_shadow
+from app.storage import store_and_record
 from app.validate.validate import ValidateError, validate_quote_full
 from app.validate.validators import validate_l2_reconcile
 
@@ -48,10 +49,47 @@ def _auto_project_name(filenames: list[str]) -> str:
     return f"{stems[0]} 等{len(stems)}家" if len(stems) > 1 else stems[0]
 
 
+def _store_upload(
+    conn: sqlite3.Connection, path: Path, safe_name: str, task_id: int, quote_id: int
+) -> None:
+    """上传即落对象存储并登记（原始文件名 + quote 归属一起留档，供解析结果页查看/下载）。
+
+    存储故障不拖垮上传：记 parse_log 告警后继续，解析仍走本地 upload/archive 副本。
+    日志按任务级写入（quote_id 只在 detail 里），避免占位报价单在解析前被标上 stage。
+    """
+    try:
+        stored = store_and_record(
+            conn, path, original_name=safe_name, task_id=task_id, quote_id=quote_id
+        )
+    except Exception as exc:  # noqa: BLE001 - 存储降级为告警，不限定异常类型
+        conn.execute(
+            "INSERT INTO parse_log (task_id, stage, action, detail) VALUES (?, 'task', 'store_failed', ?)",
+            (task_id, json.dumps({"quote_id": quote_id, "error": str(exc)}, ensure_ascii=False)),
+        )
+        return
+    conn.execute(
+        "INSERT INTO parse_log (task_id, stage, action, detail) VALUES (?, 'task', 'upload', ?)",
+        (
+            task_id,
+            json.dumps(
+                {
+                    "original_name": safe_name,
+                    "path": str(path),
+                    "quote_id": quote_id,
+                    "object_key": stored.key,
+                    "store_backend": stored.backend,
+                    "size_bytes": stored.size_bytes,
+                },
+                ensure_ascii=False,
+            ),
+        ),
+    )
+
+
 def create_task(
     conn: sqlite3.Connection, project_name: str, files: list[tuple[str, bytes]]
 ) -> int:
-    """上传文件落盘 data/uploads/<task_id>/，建 task 行（status='parsing'），返回 task_id。
+    """上传文件落盘 data/uploads/<task_id>/ 并登记对象存储，建 task 行（status='parsing'），返回 task_id。
 
     project_name 为空时按文件名自动命名。每个文件同步预建 quote 占位行
     （parse_status='pending'，supplier_name 记原文件名），进度接口从任务创建起即可逐文件展示；
@@ -77,13 +115,8 @@ def create_task(
                 "INSERT INTO quote (task_id, supplier_name, parse_status) VALUES (?, ?, 'pending')",
                 (task_id, safe_name),
             )
-            conn.execute(
-                "INSERT INTO parse_log (task_id, stage, action, detail) VALUES (?, 'task', 'upload', ?)",
-                (task_id, json.dumps(
-                    {"original_name": safe_name, "path": str(path), "quote_id": cur.lastrowid},
-                    ensure_ascii=False,
-                )),
-            )
+            quote_id = cur.lastrowid
+            _store_upload(conn, path, safe_name, task_id, quote_id)
     return task_id
 
 

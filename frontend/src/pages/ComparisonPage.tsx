@@ -131,6 +131,8 @@ export default function ComparisonPage() {
 
           <MasterMatchCard taskId={taskId} />
 
+          <NewProcessCard taskId={taskId} />
+
           <Card
             title={`任务 #${data.task_id} 比价结果`}
             extra={
@@ -201,8 +203,6 @@ export default function ComparisonPage() {
               <FingerprintTable comparison={data} />
             )}
           </Card>
-
-          <NewProcessCard taskId={taskId} />
         </>
       )}
     </Space>

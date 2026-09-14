@@ -452,6 +452,8 @@ export async function getSupplierHistory(
     category_code?: string
     date_from?: string
     date_to?: string
+    domain_codes?: string
+    atom_codes?: string
     compare_code?: string
   } = {},
 ): Promise<SupplierHistory> {
@@ -460,6 +462,64 @@ export async function getSupplierHistory(
     { params },
   )
   return data
+}
+
+// ---------- 报价单源文件 ----------
+
+/** 从 Content-Disposition 取文件名：优先 RFC 5987 的 filename*，兼容中文名 */
+export function filenameFromDisposition(disposition: string | undefined): string | null {
+  if (!disposition) return null
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded[1].trim())
+    } catch {
+      return encoded[1].trim()
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(disposition)
+  return plain ? plain[1].trim() : null
+}
+
+async function fetchQuoteSource(
+  quoteId: number,
+  inline: boolean,
+): Promise<{ blob: Blob; filename: string; contentType: string }> {
+  const response = await http.get<Blob>(`/api/quotes/${quoteId}/source${inline ? '/preview' : ''}`, {
+    responseType: 'blob',
+  })
+  const disposition = response.headers['content-disposition']
+  const contentType = response.headers['content-type']
+  return {
+    blob: response.data,
+    filename:
+      filenameFromDisposition(typeof disposition === 'string' ? disposition : undefined) ??
+      `quote-${quoteId}`,
+    contentType:
+      (typeof contentType === 'string' ? contentType : null) ||
+      response.data.type ||
+      'application/octet-stream',
+  }
+}
+
+/** 下载源文件：取回 blob 后由前端触发保存，文件名沿用上传时的原名 */
+export async function downloadQuoteSource(quoteId: number): Promise<void> {
+  const { blob, filename } = await fetchQuoteSource(quoteId, false)
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
+
+/** 预览源文件：pdf/图片后端内联返回，其它格式 415（调用方应提示下载） */
+export async function fetchQuoteSourcePreview(
+  quoteId: number,
+): Promise<{ blob: Blob; filename: string; contentType: string }> {
+  return fetchQuoteSource(quoteId, true)
 }
 
 /**

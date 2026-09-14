@@ -62,6 +62,15 @@ uv run python app/main.py        # 或 uv run uvicorn app.main:app --host 127.0.
 
 健康检查：`curl http://127.0.0.1:8002/health` → `{"status":"ok"}`。
 
+## 文件存储（对象存储）
+
+报价单上传后先落对象存储（原件二进制），再进解析流水线；解析结果与报价单详情都带源文件名称，前端可在线预览（PDF/图片）或下载。
+
+- 默认本地实现（内容寻址）：`app/storage.py`，key = `objects/<sha256 前两位>/<sha256><扩展名>`，同一文件重复上传走硬链接，只占一份空间。
+- 元数据落在 `stored_object` 表（每次上传一条：原名/大小/内容类型/SHA256/存储 key/时间）。
+- 存储失败不阻断解析，只在 `parse_log` 打 `store_failed` 告警。
+- 配置：`OBJECT_STORE_BACKEND`（`local` 默认 / `s3` 预留，需装 boto3 后补 `S3ObjectStore`）、`OBJECT_STORE_DIR`（默认 `backend/data/object_store`）。
+
 ## 测试
 
 ```bash
@@ -75,8 +84,9 @@ app/
   main.py        FastAPI 入口（/health，CORS 全开，本地 demo）
   db.py          SQLite 连接管理 + init_db()
   schema.sql     全部建表 DDL（主数据 8 表 + 业务 7 表）
+  storage.py     对象存储（ObjectStore 抽象 + 本地内容寻址实现）
 scripts/
   import_master_data.py   原子清单 xlsx → 主数据表
-data/            SQLite 库文件（*.db 已 gitignore）
+data/            SQLite 库文件 / 上传归档 / 快照 / 对象存储（*.db 已 gitignore）
 tests/           pytest
 ```

@@ -23,7 +23,7 @@
                           机械对比引擎(纯脚本) ←—— JSON/关系库 ——┘
                                     ↓
                           LLM 综合分析层(AI 分析模块内容)
-         [存储] SQLite(主数据+业务数据) + 文件系统(原件归档+JSON快照)
+         [存储] SQLite(主数据+业务数据) + 对象存储(原件) + 文件系统(归档+JSON快照)
 ```
 
 技术选型（可替换）：Python FastAPI + SQLite + 后台任务队列；前端 React SPA；进度用 SSE 推送。
@@ -121,6 +121,7 @@
 
 - **JSON 是处理基准**：解析、校验、确认、对比过程中的所有操作在 JSON 上进行；确认后的 JSON 快照原样存档（审计、重解析、结构迁移用）。
 - **关系库是查询索引**：跨报价单聚合对比天然是 SQL 场景；`quote` 表冗余六个模块合计列，层级对比查询免聚合；`quote.other_info` 保存解析阶段额外识别到的其它信息（markdown，已剔除手机号/姓名/邮箱/印章等个人信息与银行开户信息），供 AI 分析模块作为补充信息源。
+- **对象存储存原件**：报价单上传即入对象存储（`stored_object` 表记元数据 + 后端 `app/storage.py` 二进制存储），解析结果保留 `source_file_name`，前端可在线预览（PDF/图片）或下载原件。本地实现为内容寻址：key = `objects/<sha256 前两位>/<sha256><扩展名>`，同一份文件重复上传只占一份空间（硬链接去重），上传失败只打 `parse_log` 的 `store_failed` 告警，不阻断解析。接口抽象为 `ObjectStore`，`S3ObjectStore` 预留，配置项 `OBJECT_STORE_BACKEND=local|s3`、`OBJECT_STORE_DIR`。
 - SQLite 起步（单机零运维，备份=复制文件），多人协作时平迁 PostgreSQL，表结构不变。
 
 ## 10. 后端模块清单（15 个）

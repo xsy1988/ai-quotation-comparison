@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Table, Tag } from 'antd'
+import { Space, Table, Tag, Tooltip, Typography } from 'antd'
 import type { Comparison } from '../types'
 import Amount from './Amount'
 
@@ -46,12 +46,24 @@ export default function FingerprintTable({ comparison }: Props) {
             bordered
             style={{ marginBottom: 16 }}
             title={() => (
-              <span>
-                指纹 <Tag>{group.fingerprint}</Tag>
-                <span style={{ color: '#999', fontSize: 12 }}>
+              <div>
+                <Space size={4} wrap>
+                  <span>指纹</span>
+                  {group.atoms.map((atom) => (
+                    <Tooltip key={atom.code} title={atom.code}>
+                      <Tag color="blue" style={{ marginRight: 0 }}>
+                        {atom.name ?? atom.code}
+                      </Tag>
+                    </Tooltip>
+                  ))}
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    编码 {group.fingerprint}
+                  </Typography.Text>
+                </Space>
+                <div style={{ color: '#999', fontSize: 12 }}>
                   同一指纹 = 各供应商对这些工艺项的打包/拆分口径一致，可横向对齐
-                </span>
-              </span>
+                </div>
+              </div>
             )}
             dataSource={rows}
             rowClassName={(row, index) =>

@@ -7,6 +7,7 @@ import { Link } from 'react-router-dom'
 import { listQuotes } from '../api/client'
 import type { QuoteListItem } from '../types'
 import Amount from '../components/Amount'
+import SourceFileActions from '../components/SourceFileActions'
 
 const PARSE_STATUS: Record<string, { text: string; color: string }> = {
   pending: { text: '待解析', color: 'default' },
@@ -17,11 +18,11 @@ const PARSE_STATUS: Record<string, { text: string; color: string }> = {
 }
 
 /** 列宽即最小宽度：内容更宽时整表横向滚动，不把中文挤成一列一字 */
-/** 列宽：11 列合计约 1290px，1440 宽的屏幕不出现横向滚动，更窄时才滚动 */
+/** 列宽：12 列合计约 1410px，常见 1440 宽屏幕基本不出现横向滚动，更窄时才滚动 */
 const COL_WIDTH = {
   quote: 84,
-  supplier: 220,
-  part: 130,
+  supplier: 200,
+  part: 120,
   category: 86,
   price: 110,
   status: 136,
@@ -29,6 +30,7 @@ const COL_WIDTH = {
   other: 88,
   task: 88,
   created: 130,
+  source: 168,
   action: 120,
 }
 
@@ -136,6 +138,22 @@ export default function QuoteListPage() {
           <Link to={`/tasks/${id}/comparison`}>#{id}</Link>
         </Tooltip>
       ),
+    },
+    {
+      title: '源文件',
+      dataIndex: 'source_file_name',
+      width: COL_WIDTH.source,
+      render: (name: string | null, record) =>
+        name ? (
+          <SourceFileActions
+            quoteId={record.quote_id}
+            name={name}
+            variant="links"
+            showSize={false}
+          />
+        ) : (
+          <span className="na-cell">—</span>
+        ),
     },
     {
       title: '创建时间',

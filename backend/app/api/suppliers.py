@@ -63,6 +63,126 @@ def _date_of(basic: dict, created_at: str | None) -> tuple[str, str]:
     return (created_at or "")[:10], "created"
 
 
+def _split_codes(raw: str | None) -> list[str]:
+    return [c.strip() for c in (raw or "").split(",") if c.strip()]
+
+
+def _process_clause(
+    domain_codes: list[str], atom_codes: list[str]
+) -> tuple[str, list[str]]:
+    """工艺域/原子工艺筛选 → 报价级 EXISTS 子句（只保留命中工艺的报价单）。
+
+    语义：不改变指标口径（纵轴仍是整单费用细项），只是把没做这些工艺的报价单排除在外。
+    """
+    if not domain_codes and not atom_codes:
+        return "", []
+    conds: list[str] = []
+    params: list[str] = []
+    if domain_codes:
+        conds.append(f"a.domain_code IN ({', '.join('?' for _ in domain_codes)})")
+        params += domain_codes
+    if atom_codes:
+        conds.append(f"l.atom_code IN ({', '.join('?' for _ in atom_codes)})")
+        params += atom_codes
+    clause = (
+        " AND EXISTS (SELECT 1 FROM quote_line l JOIN atom a ON a.code = l.atom_code"
+        f" WHERE l.quote_id = q.id AND {' AND '.join(conds)})"
+    )
+    return clause, params
+
+
+def _matched_process(
+    conn,
+    quote_ids: list[int],
+    domain_codes: list[str],
+    atom_codes: list[str],
+) -> dict[int, dict]:
+    """每份报价单命中的工艺（工艺域 + 原子工艺名称）。
+
+    未选工艺筛选时返回该报价单的全部已匹配原子；选了筛选时只返回命中的部分。
+    """
+    if not quote_ids:
+        return {}
+    conds: list[str] = []
+    params: list = list(quote_ids)
+    if domain_codes:
+        conds.append(f"a.domain_code IN ({', '.join('?' for _ in domain_codes)})")
+        params += domain_codes
+    if atom_codes:
+        conds.append(f"l.atom_code IN ({', '.join('?' for _ in atom_codes)})")
+        params += atom_codes
+    where = " AND " + " AND ".join(conds) if conds else ""
+    rows = conn.execute(
+        f"""SELECT l.quote_id, a.code, a.name, a.domain_code, d.name AS domain_name
+            FROM quote_line l
+            JOIN atom a ON a.code = l.atom_code
+            LEFT JOIN process_domain d ON d.code = a.domain_code
+            WHERE l.quote_id IN ({', '.join('?' for _ in quote_ids)}){where}
+            GROUP BY l.quote_id, a.code
+            ORDER BY a.domain_code, a.code""",
+        params,
+    ).fetchall()
+
+    matched: dict[int, dict] = {}
+    for row in rows:
+        slot = matched.setdefault(row["quote_id"], {"atoms": [], "domains": []})
+        slot["atoms"].append({"code": row["code"], "name": row["name"]})
+        domain = {"code": row["domain_code"], "name": row["domain_name"]}
+        if domain not in slot["domains"]:
+            slot["domains"].append(domain)
+    return matched
+
+
+def _process_options(conn, codes: list[str]) -> tuple[list[dict], list[dict]]:
+    """可选项：该供应商（含对比供应商）历史报价中出现过的工艺域 / 原子工艺。
+
+    只给出「选了能有结果」的选项，避免几百条主数据原子里绝大多数点了是空图。
+    """
+    if not codes:
+        return [], []
+    placeholders = ", ".join("?" for _ in codes)
+    base_sql = f"""FROM quote_line l
+            JOIN quote q ON q.id = l.quote_id
+            JOIN atom a ON a.code = l.atom_code
+            LEFT JOIN process_domain d ON d.code = a.domain_code
+            WHERE q.supplier_code IN ({placeholders})
+              AND q.parse_status IN (?, ?)"""
+    params = (*codes, *_PARSED_STATUSES)
+    atom_rows = conn.execute(
+        f"""SELECT a.code, a.name, a.domain_code, COUNT(DISTINCT l.quote_id) AS quote_count
+            {base_sql}
+            GROUP BY a.code
+            ORDER BY a.domain_code, a.code""",
+        params,
+    ).fetchall()
+    # 域的去重报价单数不能由原子的计数相加得到（同一份报价单可命中同域多个原子）
+    domain_rows = conn.execute(
+        f"""SELECT a.domain_code AS code, d.name AS name, COUNT(DISTINCT l.quote_id) AS quote_count
+            {base_sql}
+            GROUP BY a.domain_code
+            ORDER BY a.domain_code""",
+        params,
+    ).fetchall()
+    atoms = [
+        {
+            "code": row["code"],
+            "name": row["name"],
+            "domain_code": row["domain_code"],
+            "quote_count": row["quote_count"],
+        }
+        for row in atom_rows
+    ]
+    domains = [
+        {
+            "code": row["code"],
+            "name": row["name"] or row["code"],
+            "quote_count": row["quote_count"],
+        }
+        for row in domain_rows
+    ]
+    return domains, atoms
+
+
 def _quote_points(
     conn,
     codes: list[str],
@@ -70,10 +190,13 @@ def _quote_points(
     category_code: str | None,
     date_from: str | None,
     date_to: str | None,
+    domain_codes: list[str] | None = None,
+    atom_codes: list[str] | None = None,
 ) -> list[dict]:
     """按供应商编码集合取报价点（多供应商时用于叠加对比曲线）。"""
     if not codes:
         return []
+    process_clause, process_params = _process_clause(domain_codes or [], atom_codes or [])
     names = {row["code"]: row["name"] for row in conn.execute("SELECT code, name FROM supplier")}
     selected = [
         "q.id",
@@ -91,9 +214,9 @@ def _quote_points(
             FROM quote q
             LEFT JOIN category c ON c.code = q.category_code
             WHERE q.supplier_code IN ({placeholders})
-              AND q.parse_status IN (?, ?)
+              AND q.parse_status IN (?, ?){process_clause}
             ORDER BY q.id""",
-        (*codes, *_PARSED_STATUSES),
+        (*codes, *_PARSED_STATUSES, *process_params),
     ).fetchall()
 
     points = []
@@ -126,6 +249,13 @@ def _quote_points(
             }
         )
     points.sort(key=lambda p: (p["date"], p["quote_id"]))
+    matched = _matched_process(
+        conn, [p["quote_id"] for p in points], domain_codes or [], atom_codes or []
+    )
+    for point in points:
+        hit = matched.get(point["quote_id"]) or {"atoms": [], "domains": []}
+        point["matched_atoms"] = hit["atoms"]
+        point["matched_domains"] = hit["domains"]
     return points
 
 
@@ -136,9 +266,11 @@ def supplier_history(
     category_code: str | None = Query(default=None),
     date_from: str | None = Query(default=None, description="YYYY-MM-DD"),
     date_to: str | None = Query(default=None, description="YYYY-MM-DD"),
+    domain_codes: str | None = Query(default=None, description="逗号分隔的工艺域 code，可多选"),
+    atom_codes: str | None = Query(default=None, description="逗号分隔的原子工艺 code，可多选"),
     compare_code: str | None = Query(default=None, description="叠加对比的供应商编码"),
 ) -> dict:
-    """某供应商的历史报价点 + 可选另加一家供应商同期对比。"""
+    """某供应商的历史报价点 + 可选另加一家供应商同期对比（工艺域/原子工艺按报价单级过滤）。"""
     init_db()
     conn = get_connection()
     try:
@@ -147,9 +279,18 @@ def supplier_history(
         compare = None
         if compare_code and compare_code != code:
             compare = _supplier_or_404(conn, compare_code)
+        selected_domains = _split_codes(domain_codes)
+        selected_atoms = _split_codes(atom_codes)
         codes = [code] + ([compare_code] if compare else [])
         points = _quote_points(
-            conn, codes, metric_keys, category_code or None, date_from or None, date_to or None
+            conn,
+            codes,
+            metric_keys,
+            category_code or None,
+            date_from or None,
+            date_to or None,
+            selected_domains,
+            selected_atoms,
         )
         # 品类下拉：该供应商出现过的品类
         categories = [
@@ -162,6 +303,7 @@ def supplier_history(
                 (code, *_PARSED_STATUSES),
             )
         ]
+        domain_options, atom_options = _process_options(conn, codes)
         total_quotes = conn.execute(
             f"""SELECT COUNT(*) FROM quote
                 WHERE supplier_code = ? AND parse_status IN ({', '.join('?' for _ in _PARSED_STATUSES)})""",
@@ -177,6 +319,9 @@ def supplier_history(
                 {"key": k, "label": label} for k, (_col, label) in METRIC_COLUMNS.items()
             ],
             "categories": categories,
+            "domain_options": domain_options,
+            "atom_options": atom_options,
+            "process_filter": {"domain_codes": selected_domains, "atom_codes": selected_atoms},
             "points": points,
             # quote_count 是该供应商的报价单总数（不受筛选影响）；filtered_count 为当前筛选命中数
             "quote_count": total_quotes,

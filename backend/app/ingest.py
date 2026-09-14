@@ -2,7 +2,7 @@
 
 格式分派：.xlsx/.xlsm → excel_to_ir；.docx/.pdf → app.ingest_formats（结构化抽取，
 PDF 扫描页自动渲染为图片走 vision OCR）；.png/.jpg/.jpeg → app.ingest_formats.image_to_ir（vision OCR，失败上抛不降级）。
-查重门禁与归档/登记逻辑全格式共用。
+查重门禁与归档/登记逻辑全格式共用；原件同时幂等落对象存储（stored_object 留档原文件名）。
 """
 
 import hashlib
@@ -16,6 +16,7 @@ from .db import get_connection, init_db
 from .formula_eval import solve_missing_formulas
 from .ir import CellValue, IR, TableRow
 from .normalize import display_number
+from .storage import find_object_by_sha, store_and_record
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 ARCHIVE_DIR = DATA_DIR / "archive"
@@ -120,8 +121,25 @@ def _to_ir(path: Path, file_hash: str) -> IR:
     raise ValueError(f"不支持的文件格式：{path.suffix}（支持 xlsx/xlsm/docx/pdf/png/jpg/jpeg）")
 
 
+def ensure_stored(path: Path, file_hash: str) -> None:
+    """幂等补登对象存储：上传钩子已登记过同一内容则跳过。
+
+    存储不可用（未实现的后端/磁盘满）不影响解析，本地归档副本仍在，故此处静默降级。
+    """
+    conn = get_connection()
+    try:
+        if find_object_by_sha(conn, file_hash) is not None:
+            return
+        with conn:
+            store_and_record(conn, path, original_name=path.name, sha256=file_hash)
+    except Exception:  # noqa: BLE001 - 存储是增强能力，失败不阻断接入
+        return
+    finally:
+        conn.close()
+
+
 def ingest_file(path: Path, force: bool = False) -> dict:
-    """查重 → 接入 → 归档 + IR 快照。返回处理结果描述（命中历史则复用）。"""
+    """查重 → 接入 → 归档 + IR 快照 + 对象存储。返回处理结果描述（命中历史则复用）。"""
     path = path.resolve()
     if not path.exists():
         raise FileNotFoundError(path)
@@ -130,6 +148,7 @@ def ingest_file(path: Path, force: bool = False) -> dict:
     file_hash = sha256_of(path)
     existing = find_source_file(file_hash)
     if existing and not force:
+        ensure_stored(path, file_hash)
         return {
             "status": "reused",
             "sha256": file_hash,
@@ -169,6 +188,8 @@ def ingest_file(path: Path, force: bool = False) -> dict:
                 source_id = cur.lastrowid
     finally:
         conn.close()
+
+    ensure_stored(path, file_hash)
 
     return {
         "status": "ingested",

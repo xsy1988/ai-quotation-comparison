@@ -145,6 +145,8 @@ export interface FingerprintRow {
 
 export interface FingerprintGroup {
   fingerprint: string
+  /** 指纹由「|」连接的原子编码组成，这里补上对应名称（历史编码缺名称时为 null） */
+  atoms: { code: string; name: string | null }[]
   rows: FingerprintRow[]
 }
 
@@ -310,6 +312,8 @@ export interface QuoteListItem {
   parse_status: string
   line_count: number
   has_other_info: boolean
+  /** 上传源文件的原名（对象存储登记；无登记时回退归档记录） */
+  source_file_name: string | null
   created_at: string
 }
 
@@ -366,6 +370,13 @@ export interface QuoteDetail {
   }
   lines: QuoteLine[]
   tooling: QuoteToolingLine[]
+  /** 上传的源文件（对象存储登记），可下载/在线预览 */
+  source_file: {
+    name: string
+    size_bytes: number | null
+    content_type: string
+    previewable: boolean
+  } | null
   /** 解析时额外识别到的信息（markdown，已剔除手机号/姓名/邮箱/印章等个人信息与银行开户信息） */
   other_info: string | null
 }
@@ -593,6 +604,9 @@ export interface SupplierHistoryPoint {
   scheme: string | null
   /** 指标 key -> 金额（null = 未识别） */
   metrics: Record<string, number | null>
+  /** 该报价单命中的原子工艺（未选工艺筛选时是全部已匹配原子） */
+  matched_atoms: { code: string; name: string }[]
+  matched_domains: { code: string; name: string | null }[]
 }
 
 export interface SupplierHistory {
@@ -601,6 +615,11 @@ export interface SupplierHistory {
   metrics: { key: string; label: string }[]
   metric_options: { key: string; label: string }[]
   categories: { code: string; name: string }[]
+  /** 工艺域 / 原子工艺可选项（来自该供应商历史报价里真实出现过的工艺） */
+  domain_options: { code: string; name: string; quote_count: number }[]
+  atom_options: { code: string; name: string; domain_code: string; quote_count: number }[]
+  /** 当前生效的工艺筛选（回显用） */
+  process_filter: { domain_codes: string[]; atom_codes: string[] }
   points: SupplierHistoryPoint[]
   quote_count: number
   /** 当前筛选条件命中的报价单数（quote_count 为供应商报价单总数） */

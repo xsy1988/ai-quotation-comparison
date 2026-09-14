@@ -235,8 +235,20 @@ def _fingerprint_groups(conn: sqlite3.Connection, quote_ids: list[int]) -> list[
         grouped.setdefault(row["fingerprint"], []).append(
             {"quote_id": row["quote_id"], "item_name": row["item_name"], "amount": row["amount"]}
         )
+    # 指纹是「|」连接的原子编码，前端只有代号没法读；一次性查表补上原子名称
+    names = {
+        row["code"]: row["name"]
+        for row in conn.execute("SELECT code, name FROM atom").fetchall()
+    }
     return [
-        {"fingerprint": fp, "rows": rows} for fp, rows in sorted(grouped.items())
+        {
+            "fingerprint": fp,
+            "atoms": [
+                {"code": code, "name": names.get(code)} for code in fp.split("|") if code
+            ],
+            "rows": group_rows,
+        }
+        for fp, group_rows in sorted(grouped.items())
     ]
 
 

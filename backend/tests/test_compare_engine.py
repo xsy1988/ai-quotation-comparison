@@ -642,6 +642,26 @@ def test_fingerprint_groups(comparison):
     bundle = fps["AT-QX-001|AT-ZH-013"]
     assert {r["quote_id"] for r in bundle["rows"]} == {qa, qb}
     assert "AT-ZP-005" in fps  # 仅 B 的单项指纹也成组
+    # 指纹要连原子名称一起给（前端不展示代号，人记不住）
+    assert [a["code"] for a in single["atoms"]] == ["AT-QX-001"]
+    assert single["atoms"][0]["name"]
+    assert [a["code"] for a in bundle["atoms"]] == ["AT-QX-001", "AT-ZH-013"]
+    assert all(a["name"] for a in bundle["atoms"])
+    conn.close()
+
+
+def test_fingerprint_atoms_unknown_code(comparison):
+    """指纹里的编码不在原子主数据里（历史脏数据）时，名称给 None 而不是抛错。"""
+    conn, task_id, qa, qb, _ = comparison
+    with conn:
+        conn.execute(
+            "UPDATE quote_line SET fingerprint = 'AT-XX-999'"
+            " WHERE quote_id = ? AND atom_code = 'AT-QX-001'",
+            (qa,),
+        )
+    result = get_comparison(conn, task_id)
+    group = next(g for g in result["fingerprint_groups"] if g["fingerprint"] == "AT-XX-999")
+    assert group["atoms"] == [{"code": "AT-XX-999", "name": None}]
     conn.close()
 
 

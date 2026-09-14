@@ -23,6 +23,17 @@ def isolated_snapshots(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_object_store(tmp_path, monkeypatch):
+    """所有测试把对象存储写到临时目录，不污染 data/object_store/。"""
+    from app import storage
+
+    monkeypatch.setenv("OBJECT_STORE_DIR", str(tmp_path / "object_store"))
+    storage.set_store(None)
+    yield
+    storage.set_store(None)
+
+
+@pytest.fixture(autouse=True)
 def isolated_llm_traces(tmp_path, monkeypatch):
     """所有测试把 LLM 轮次留痕写到临时目录，不污染 data/llm_trace/。"""
     from app.pipeline import layout_understand

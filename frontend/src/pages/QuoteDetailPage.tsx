@@ -19,6 +19,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { errorDetail, getQuote, httpStatus } from '../api/client'
 import type { QuoteLine, QuoteToolingLine } from '../types'
 import Amount from '../components/Amount'
+import SourceFileActions from '../components/SourceFileActions'
 import { CollapsibleText } from '../components/MarkdownLite'
 
 const MODULE_LABEL: Record<string, string> = {
@@ -254,6 +255,20 @@ export default function QuoteDetailPage() {
               {data.category_code}
             </Descriptions.Item>
           )}
+          <Descriptions.Item label="源文件" span={2}>
+            {data.source_file ? (
+              <SourceFileActions
+                quoteId={data.quote_id}
+                name={data.source_file.name}
+                sizeBytes={data.source_file.size_bytes}
+                previewable={data.source_file.previewable}
+              />
+            ) : (
+              <Typography.Text type="secondary">
+                未留存源文件（该报价单早于对象存储功能，或解析由脚本导入）
+              </Typography.Text>
+            )}
+          </Descriptions.Item>
         </Descriptions>
       </Card>
 

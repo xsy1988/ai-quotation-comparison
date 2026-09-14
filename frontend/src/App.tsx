@@ -9,8 +9,12 @@ import {
   ShopOutlined,
 } from '@ant-design/icons'
 import { Link, Outlet, useLocation } from 'react-router-dom'
+import AppBreadcrumb from './components/AppBreadcrumb'
 
 const { Header, Sider, Content } = Layout
+
+/** 顶部栏与左侧 logo 区统一高度：两侧顶边对齐，不出现一高一矮 */
+const HEADER_HEIGHT = 64
 
 /** 左侧菜单：key 为路由前缀，最长前缀匹配决定选中项 */
 const NAV_ITEMS = [
@@ -64,7 +68,12 @@ export default function App() {
         <div
           style={{
             color: '#fff',
-            padding: collapsed ? '16px 4px' : '16px 20px',
+            height: HEADER_HEIGHT,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: collapsed ? '0 4px' : '0 20px',
+            boxSizing: 'border-box',
             fontSize: collapsed ? 12 : 15,
             fontWeight: 600,
             whiteSpace: 'nowrap',
@@ -88,6 +97,8 @@ export default function App() {
             background: '#fff',
             borderBottom: '1px solid #f0f0f0',
             paddingInline: 24,
+            height: HEADER_HEIGHT,
+            lineHeight: `${HEADER_HEIGHT}px`,
             display: 'flex',
             alignItems: 'center',
           }}
@@ -97,6 +108,7 @@ export default function App() {
           </Typography.Text>
         </Header>
         <Content style={{ padding: 24, maxWidth: 1440, width: '100%', margin: '0 auto' }}>
+          <AppBreadcrumb />
           <Outlet />
         </Content>
       </Layout>

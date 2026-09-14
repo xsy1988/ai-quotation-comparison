@@ -5,10 +5,14 @@
 """
 
 import json
+from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.db import get_connection, init_db
+from app.storage import content_type_of, find_object_by_sha, find_object_for_quote, get_store, is_previewable
 
 router = APIRouter(prefix="/api/quotes", tags=["quotes"])
 
@@ -42,6 +46,80 @@ def _quote_or_404(conn, quote_id: int):
     return row
 
 
+def _archived_source(conn, row) -> dict | None:
+    """老数据回退：source_file 归档副本 → 上传目录副本。"""
+    if row["file_hash"]:
+        sf = conn.execute(
+            "SELECT original_name, archived_path FROM source_file WHERE sha256 = ?",
+            (row["file_hash"],),
+        ).fetchone()
+        if sf:
+            path = Path(sf["archived_path"])
+            if path.is_file():
+                name = sf["original_name"] or path.name
+                return _source_info(name, path, path.stat().st_size, local_path=path)
+    if row["task_id"]:
+        from app.pipeline.pipeline import UPLOAD_DIR  # 惰性导入：避免 API 层拉起流水线依赖
+
+        upload_dir = UPLOAD_DIR / str(row["task_id"])
+        if upload_dir.is_dir():
+            candidates = sorted(p for p in upload_dir.iterdir() if p.is_file())
+            if len(candidates) == 1:
+                path = candidates[0]
+                return _source_info(path.name, path, path.stat().st_size, local_path=path)
+    return None
+
+
+def _source_info(name: str, path: Path | None, size: int | None, local_path=None, key=None) -> dict:
+    return {
+        "name": name,
+        "content_type": content_type_of(name),
+        "size_bytes": size if size is not None else (local_path.stat().st_size if local_path else None),
+        "local_path": local_path,
+        "key": key,
+        "previewable": is_previewable(name),
+    }
+
+
+def source_of_quote(conn, row) -> dict | None:
+    """定位源文件：优先本次上传登记的 stored_object，再按内容哈希回退，最后回退本地归档副本。"""
+    obj = find_object_for_quote(conn, row["id"]) or (
+        find_object_by_sha(conn, row["file_hash"]) if row["file_hash"] else None
+    )
+    if obj is not None:
+        store = get_store()
+        local = store.local_path(obj["object_key"])
+        return _source_info(
+            obj["original_name"],
+            local,
+            obj["size_bytes"],
+            local_path=local,
+            key=obj["object_key"],
+        )
+    return _archived_source(conn, row)
+
+
+def _source_response(conn, quote_id: int, inline: bool):
+    """下载/预览源文件。inline=True 仅允许浏览器可渲染格式（其余 415）。"""
+    row = _quote_or_404(conn, quote_id)
+    info = source_of_quote(conn, row)
+    if info is None:
+        raise HTTPException(status_code=404, detail="源文件不存在或已被清理")
+    if inline and not info["previewable"]:
+        raise HTTPException(status_code=415, detail="该格式不支持在线预览，请下载后查看")
+
+    disposition = "inline" if inline else "attachment"
+    headers = {
+        "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(info['name'])}",
+        "Content-Length": str(info["size_bytes"] or 0),
+    }
+    if info["local_path"] is not None:
+        return FileResponse(info["local_path"], media_type=info["content_type"], headers=headers)
+    return StreamingResponse(
+        get_store().open(info["key"]), media_type=info["content_type"], headers=headers
+    )
+
+
 @router.get("")
 def list_quotes(
     q: str | None = Query(None, description="供应商名称/零件名称模糊搜索"),
@@ -70,6 +148,11 @@ def list_quotes(
                        c.name AS category_name, q.basic_info, q.final_unit_price_taxed,
                        q.tooling_total, q.flags, q.calc_check, q.parse_status, q.created_at,
                        (q.other_info IS NOT NULL AND q.other_info <> '') AS has_other_info,
+                       COALESCE(
+                           (SELECT so.original_name FROM stored_object so
+                             WHERE so.quote_id = q.id ORDER BY so.id DESC LIMIT 1),
+                           (SELECT sf.original_name FROM source_file sf WHERE sf.sha256 = q.file_hash)
+                       ) AS source_file_name,
                        (SELECT COUNT(*) FROM quote_line l WHERE l.quote_id = q.id) AS line_count
                 FROM quote q
                 LEFT JOIN comparison_task t ON t.id = q.task_id
@@ -97,6 +180,7 @@ def list_quotes(
                     "parse_status": row["parse_status"],
                     "line_count": row["line_count"],
                     "has_other_info": bool(row["has_other_info"]),
+                    "source_file_name": row["source_file_name"],
                     "created_at": row["created_at"],
                 }
             )
@@ -162,6 +246,8 @@ def quote_detail(quote_id: int) -> dict:
             (quote_id,),
         ).fetchall()
 
+        source = source_of_quote(conn, row)
+
         return {
             "quote_id": row["id"],
             "task_id": row["task_id"],
@@ -198,8 +284,40 @@ def quote_detail(quote_id: int) -> dict:
                 for t in tooling_rows
             ],
             "other_info": row["other_info"],
+            "source_file": (
+                {
+                    "name": source["name"],
+                    "size_bytes": source["size_bytes"],
+                    "content_type": source["content_type"],
+                    "previewable": source["previewable"],
+                }
+                if source
+                else None
+            ),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+    finally:
+        conn.close()
+
+
+@router.get("/{quote_id}/source")
+def download_source(quote_id: int):
+    """下载源文件（Content-Disposition: attachment，中文名按 RFC 5987 编码）。"""
+    init_db()
+    conn = get_connection()
+    try:
+        return _source_response(conn, quote_id, inline=False)
+    finally:
+        conn.close()
+
+
+@router.get("/{quote_id}/source/preview")
+def preview_source(quote_id: int):
+    """在线预览源文件（pdf/图片内联返回；其它格式 415，前端提示下载）。"""
+    init_db()
+    conn = get_connection()
+    try:
+        return _source_response(conn, quote_id, inline=True)
     finally:
         conn.close()

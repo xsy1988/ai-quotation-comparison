@@ -11,7 +11,8 @@ import { useSupplierColumnFit } from './compareUtils'
 const AUTO_TRIGGERED = new Set<string>()
 
 const DIMENSION_LABEL = '维度'
-const DIMENSION_WIDTH = 132
+/** 维度列宽度：子维度名较长时截断（配 title 悬浮查看），不换行以免撑高行 */
+const DIMENSION_WIDTH = 160
 /** AI 单元格是整句话（优势/劣势/风险），最小宽度比报价对比列更宽 */
 const SUPPLIER_COL_MIN_WIDTH = 240
 
@@ -281,6 +282,8 @@ export default function AiAnalysisSection({
           key: 'label',
           width: DIMENSION_WIDTH,
           fixed: 'left',
+          // 子项标题较长时截断并给原生 title 提示，避免换行把行高撑成两行
+          ellipsis: { showTitle: true },
         },
         ...suppliers.map((s, index) => ({
           title: (
@@ -326,18 +329,25 @@ export default function AiAnalysisSection({
   return (
     <Card
       size="small"
+      // 卡片头部留白：标题行与标签不再贴住模块顶部，总评另起一行，标题行保持一行
+      styles={{ header: { padding: '10px 14px' } }}
       title={
-        <Space size={8} wrap>
-          <span>AI 分析</span>
-          {content && <Tag color="purple">AI 生成</Tag>}
-          {content && checkTag()}
-          {data?.stale && <Tag color="gold">数据已更新，建议重新分析</Tag>}
+        <div>
+          <Space size={8} wrap>
+            <span>AI 分析</span>
+            {content && <Tag color="purple">AI 生成</Tag>}
+            {content && checkTag()}
+            {data?.stale && <Tag color="gold">数据已更新，建议重新分析</Tag>}
+          </Space>
           {content?.overall && (
-            <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>
+            <Typography.Text
+              type="secondary"
+              style={{ fontSize: 12, fontWeight: 400, display: 'block', marginTop: 4 }}
+            >
               {content.overall}
             </Typography.Text>
           )}
-        </Space>
+        </div>
       }
       extra={
         <Button
