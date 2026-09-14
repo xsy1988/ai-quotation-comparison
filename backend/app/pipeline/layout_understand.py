@@ -37,6 +37,7 @@ from app.llm.client import LLMError, LLMUnavailable
 from app.normalize import normalize_amount
 from app.validate.validate import MODULES, iter_offers, load_envelope_schema, load_schema
 from app.validate.validators import (
+    parse_location,
     validate_l1_evidence_consistency,
     validate_l1_traceability,
     validate_l2_reconcile,
@@ -83,6 +84,8 @@ def _serialize_ir(ir: IR) -> str:
         lines.append(f"{t.sheet}|{t.row_number}|" + "|".join(parts))
     for b in ir.blocks:
         lines.append(f"BLOCK {b.sheet}!R{b.row}C{b.col} {b.text}")
+    for note in getattr(ir, "notes", None) or []:
+        lines.append(note)
     return "\n".join(lines)
 
 
@@ -163,8 +166,6 @@ def _strip_disallowed_nulls(node: Any, schema_node: dict | None) -> None:
 # 脚本交叉验证（独立实现：自带简化分类器，不复用 simple_excel_parse）
 # ---------------------------------------------------------------------------
 
-_LOCATION_RE = re.compile(r"([A-Za-z0-9_\u4e00-\u9fff]+)!?[A-Z]{0,3}(\d+)(?::[A-Z]{0,3}(\d+))?")
-
 # 简化独立版分区关键词（与 simple_excel_parse._SECTION_RULES 刻意不同，保证交叉验证独立性）
 _SCRIPT_SECTION_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("materials", ("材料费", "原材料", "铝材", "钢材", "塑胶粒", "五金件")),
@@ -240,14 +241,39 @@ def _iter_amount_items(offer: dict):
                 yield f"tooling.{key}", "amount", item
 
 
-def _parse_location(location: str | None) -> tuple[str, int] | None:
-    if not location:
+def _parse_location(location: str | None) -> tuple[str | None, int, int] | None:
+    """evidence.location → (sheet, 起始行, 结束行)；解析失败返回 None。
+
+    复用 validate/validators.parse_location（同时支持 `sheet!R9C3` RC 式与 `sheet!B7` A1 式）。
+    这里此前自带的正则解不出 RC 式：`CNC5分钟 (2)!R9C4:R9C6` 被解成 ('CNC', 5)，行号错位后
+    又叠加"按行号跨 sheet 回退"，于是第 5 行（联系电话 18003008878）被当成金额出处，
+    凭空造出一批 _cross_check 冲突。
+    """
+    parsed = parse_location(location)
+    if parsed is None:
         return None
-    m = _LOCATION_RE.search(location)
-    if not m:
-        return None
-    row = int(m.group(2))
-    return m.group(1), row
+    sheet, row_min, row_max, _col_min, _col_max = parsed
+    return sheet, row_min, row_max
+
+
+def _row_amounts_of(
+    row_amounts: dict[tuple[str, int], list[float]], sheet: str | None, row_min: int, row_max: int
+) -> list[float]:
+    """取该位置的脚本金额。
+
+    location 未带 sheet 时按行号在任意 sheet 中找（单表单据常见）；带了 sheet 却对不上时
+    不再跨 sheet 猜测——猜出来的金额比没有金额更容易误导。
+    """
+    if sheet is not None:
+        return [
+            amount for row in range(row_min, row_max + 1) for amount in row_amounts.get((sheet, row), [])
+        ]
+    return [
+        amount
+        for (_sheet, row), amounts in row_amounts.items()
+        if row_min <= row <= row_max
+        for amount in amounts
+    ]
 
 
 def cross_check(ir: IR | dict, data: dict) -> dict:
@@ -271,12 +297,7 @@ def cross_check(ir: IR | dict, data: dict) -> dict:
             loc = _parse_location((item.get("evidence") or {}).get("location"))
             if loc is None:
                 continue
-            script_amounts = row_amounts.get(loc[0], []) if loc else []
-            # location 只带单行时允许跨 sheet 回退：按行号在所有 sheet 中找
-            if not script_amounts:
-                script_amounts = next(
-                    (v for (sheet, row), v in row_amounts.items() if row == loc[1]), []
-                )
+            script_amounts = _row_amounts_of(row_amounts, loc[0], loc[1], loc[2])
             if not script_amounts:
                 continue
             if any(abs(value - a) <= _tol(value) for a in script_amounts):
@@ -296,11 +317,16 @@ def cross_check(ir: IR | dict, data: dict) -> dict:
                 total = mod.get("total")
                 if total is None:
                     continue
-                rows: set[tuple[str | None, int]] = set()
+                rows: set[tuple[str, int]] = set()
                 for item in mod.get("items") or []:
                     loc = _parse_location((item.get("evidence") or {}).get("location"))
-                    if loc is not None:
-                        rows.add(loc)
+                    if loc is None:
+                        continue
+                    sheet_name, row_min, row_max = loc
+                    if sheet_name is None:
+                        rows.update(k for k in row_module if row_min <= k[1] <= row_max)
+                    else:
+                        rows.update((sheet_name, row) for row in range(row_min, row_max + 1))
                 script_sum = round(
                     sum(a for r, (m, a) in row_module.items() if r in rows and m == module), 6
                 )

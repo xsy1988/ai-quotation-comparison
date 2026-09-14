@@ -1,6 +1,7 @@
 from app.normalize import (
     amount_in_text,
     amount_occurrences,
+    display_number,
     normalize_amount,
     normalize_currency,
     normalize_date,
@@ -76,6 +77,23 @@ def test_amount_in_text_word_boundary():
     assert not amount_in_text("不良率 20% 2.01", 0.2)  # "0.2" 是 "20" 的数字邻居场景
     assert not amount_in_text(None, 0.3)
     assert not amount_in_text("", 0.3)
+
+
+def test_amount_in_text_tolerates_float_noise():
+    """逐字符口径落空时退化为数值比对：Excel 公式求值带的尾数噪声不再误判为编造。"""
+    assert amount_in_text("3#铝合金 / 0.02 / 0.021 / 35 / 0.7000000000000001", 0.7)
+    assert amount_in_text("0.8654999999999999", 0.8655)
+    assert amount_in_text("未税合计 13.66 / 增值税 13.0", 13.0)  # "13" 被 "13.0" 挡住数字边界
+    assert not amount_in_text("合计 10.30", 0.3)  # 数值口径同样不允许跨数字匹配
+    assert not amount_in_text("不良率 20% 2.01", 0.2)
+
+
+def test_display_number_strips_binary_noise():
+    """0.02×35 的浮点噪声按 Excel 显示精度抹平。"""
+    assert display_number(0.02 * 35) == 0.7  # 0.7000000000000001 → 0.7
+    assert display_number(0.87 - 0.0045) == 0.8655
+    assert display_number(21.883015) == 21.883015
+    assert display_number(13) == 13.0
 
 
 def test_amount_occurrences_counts_boundary_hits():

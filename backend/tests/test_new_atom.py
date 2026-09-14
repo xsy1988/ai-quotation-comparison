@@ -436,3 +436,20 @@ def test_enum_apis(prepared_task):
     resp = client.get("/api/classes")
     assert resp.status_code == 200
     assert set(resp.json()) == {"主制程", "后工序", "成型加工"}
+
+
+def test_pending_suggestion_relinks_after_lines_rewritten(prepared_task):
+    """明细行重填后 pending 建议必须重新挂回新行：孤儿建议会从待决策队列里消失。"""
+    task_id, _quote_ids = prepared_task
+    conn = _conn()
+    sync_suggestions(conn, task_id)
+    with conn:
+        conn.execute(
+            "UPDATE new_atom_suggestion SET quote_line_id = NULL WHERE source_text = ?",
+            (NEW_ITEM,),
+        )
+    assert sync_suggestions(conn, task_id) == 1  # 仍在待决策队列里，不因解引用而消失
+    suggestions = list_suggestions(conn, task_id)
+    assert [s["source_text"] for s in suggestions] == [NEW_ITEM]
+    assert suggestions[0]["quote_line_id"] is not None
+    conn.close()

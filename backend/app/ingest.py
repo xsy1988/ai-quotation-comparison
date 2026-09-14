@@ -13,7 +13,9 @@ from pathlib import Path
 import openpyxl
 
 from .db import get_connection, init_db
+from .formula_eval import solve_missing_formulas
 from .ir import CellValue, IR, TableRow
+from .normalize import display_number
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 ARCHIVE_DIR = DATA_DIR / "archive"
@@ -45,27 +47,61 @@ def find_source_file(file_hash: str) -> dict | None:
         conn.close()
 
 
+def formula_cell_to_coord(key: tuple[str, int, int]) -> str:
+    """(表, 行, 列) → `表!R{行}C{列}`（与版面理解的位置写法一致，如 `报价单!R9C7`）。"""
+    sheet, row, col = key
+    return f"{sheet}!R{row}C{col}"
+
+
 def excel_to_ir(path: Path, file_hash: str) -> IR:
-    wb = openpyxl.load_workbook(path, data_only=True)
+    value_book = openpyxl.load_workbook(path, data_only=True)
+    formula_book = openpyxl.load_workbook(path, data_only=False)
+    solved, unresolved = solve_missing_formulas(value_book, formula_book)
     ir = IR(
         source_file=path.name,
         file_hash=file_hash,
         file_type=path.suffix.lstrip(".").lower(),
-        sheets=wb.sheetnames,
+        sheets=value_book.sheetnames,
         tables=[],
+        notes=[f"FORMULA {formula_cell_to_coord(key)}= {formula_book[key[0]].cell(row=key[1], column=key[2]).value}"
+               for key in sorted(solved)],
     )
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
+    for sheet_name in value_book.sheetnames:
+        ws = value_book[sheet_name]
         for row in ws.iter_rows():
             cells = [
-                CellValue(row=cell.row, col=cell.column, value=cell.value)
+                CellValue(
+                    row=cell.row,
+                    col=cell.column,
+                    value=_cell_value(cell.value, solved, sheet_name, cell.row, cell.column),
+                )
                 for cell in row
             ]
             table_row = TableRow(sheet=sheet_name, row_number=row[0].row if row else 0, cells=cells)
             if not table_row.is_empty():
                 ir.tables.append(table_row)
-    wb.close()
+    value_book.close()
+    formula_book.close()
+    if unresolved:
+        ir.notes.append(
+            "FORMULA 未求值：" + "；".join(f"{sheet}!{coord} {reason}" for sheet, coord, reason in unresolved)
+        )
     return ir
+
+
+def _cell_value(cached, solved: dict[tuple[str, int, int], float], sheet: str, row: int, col: int):
+    """单元格取值：缓存值优先，缓存为空但公式可求值时用求值结果（见 app.formula_eval）。
+
+    浮点值统一按 Excel 显示精度抹掉二进制噪声（0.7000000000000001 → 0.7）：IR 是给
+    模型看的"原文"，尾数噪声既让金额出处比对失真，也会把噪声带进下游展示。
+    """
+    if cached is None:
+        value = solved.get((sheet, row, col))
+        return display_number(value) if isinstance(value, float) else value
+    if isinstance(cached, float):
+        return display_number(cached)
+    return cached
+
 
 
 def _to_ir(path: Path, file_hash: str) -> IR:

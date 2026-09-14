@@ -1,4 +1,4 @@
-<!-- version: v2.4.0 -->
+<!-- version: v2.5.0 -->
 
 把报价单解析为 JSON：顶层为 {"offers": [...]}，每个 offer 是一份完整报价，严格符合 quote_schema v1.1（压缩版字段说明）。offers 按"产品 × 报价方案"拆分：
 1. 同一产品出现多行不同工艺路线/价格（多个报价方案）时，每行一个 offer，basic.scheme 填方案标识（取自原表方案列/品名/备注或工艺路线简述，如"方案1"）；
@@ -15,11 +15,15 @@
    例：料重 28.5 × 料价 0.96 不得写成 27.36 或 26.88，只能 amount_per_pc=null、note="料重 28.5；料价 0.96"。
 3. 单据某项只有费率没有金额时（如只有"税率13%"）→ amount_per_pc 填 null、rate 照抄费率。
 4. 表头、标题、栏目名、说明文字都不是金额出处：那里的文字和数字不得当作任何条目的金额或 name。
+5. IR 中形如 "FORMULA 表名!R9C5= =D9*1.05" 的行是"该单元格由公式算出"的说明（算式已求值并写在对应
+   单元格的值里），只作理解线索：raw_text 严禁照抄 FORMULA 行本身，仍要照抄单元格印出的数字。
+6. 单价只能取自"单价/含税单价/未税单价/合计"这类价格行：任何科目单元格（利润、管理费、损耗、
+   材料费、加工费、模治具费…）的数字都不是单价，严禁拿它当 summary.final_unit_price_taxed。
 
 每个 offer 的字段（required 标*）：
 - schema_version: "1.1"
 - supplier*: {supplier_name*: 字符串, supplier_code: null}
-- basic*: {project_name: 字符串|null, part_name*: 字符串, scheme: 字符串|null（多方案时填方案标识，单方案填 null）,
+- basic*: {project_name: 字符串|null, part_name: 字符串|null（单据印出部品名称/零件名时照抄；确实未印出填 null，禁止据报价内容自行编造）, scheme: 字符串|null（多方案时填方案标识，单方案填 null）,
   material_spec: 字符串|null,
   quote_date: "YYYY-MM-DD"|null, currency*: 枚举(CNY/USD/EUR/JPY/HKD/TWD/KRW/OTHER，判断不了填CNY),
   moq: 数字|null, category: 品类编码|null（见下方品类清单）, quote_no: 字符串|null,
@@ -65,7 +69,14 @@ evidence（每个条目必填）: {"file": 源文件名, "location": "sheet名!�
 summary*: {untaxed_total: 数字|null, tax_amount: 数字|null, taxed_total: 数字|null,
   discount: 数字|null, final_unit_price_taxed*: 数字, calc_check: "unchecked"}
 勾稽规则：未税合计 = Σ各模块合计（排除税费）；含税合计 = 未税合计 + 税额；最终含税单价 = 含税合计 − 折扣。
-按此规则计算并填 summary；算不准时 final_unit_price_taxed 必须给最优估计值。
+但 summary 的值**只作照抄、不作计算**：单据印了"未税合计/增值税(税额)/含税合计/含税单价"这类汇总行时，
+照抄对应行的数字（即使与你加总的结果不一致也照抄）；该行未印出就填 null——**禁止**自己加总、
+禁止拿某个模块或科目的单元格凑数（曾把 sga_tax 的"利润 1.19"当成含税单价填进
+final_unit_price_taxed，导致整单价格全错）。
+final_unit_price_taxed 必须取自单据的**最终单价行**（"含税单价/含税单件价/单价（含税）/含税合计"，
+只印不含税单价时照抄该不含税单价）；确实没有单价行时，取含税合计。
+税额同理：sga_tax 里没有单列税费条目、而汇总行印了"增值税/税额"时，把该数填进 summary.tax_amount
+（这是唯一允许的税额出处，事后由脚本决定是否采纳），不得自己按税率乘算。
 
 tooling: {total: 数字|null, molds/fixtures/stencils: {total: 数字|null, items: [
   {name*, amount*, cavities: 整数|null（穴数）, lifespan: 数字|null（寿命模次）, note: 字符串|null, evidence}]}}

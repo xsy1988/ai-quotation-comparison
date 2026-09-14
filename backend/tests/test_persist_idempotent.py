@@ -64,6 +64,26 @@ def test_persist_with_task_id_does_not_create_task(prepared):
     conn.close()
 
 
+def test_repersist_clears_new_atom_suggestion_reference(prepared):
+    """重填明细前先解开新工艺建议的外键：否则外键约束会让整条重填失败（曾真实发生）。"""
+    conn, task_id = prepared
+    first = persist_quote(make_quote(), task_id=task_id, file_hash="h-fk")
+    line_id = conn.execute(
+        "SELECT id FROM quote_line WHERE quote_id = ? LIMIT 1", (first["quote_id"],)
+    ).fetchone()["id"]
+    with conn:
+        conn.execute(
+            """INSERT INTO new_atom_suggestion (quote_line_id, source_text, status)
+               VALUES (?, 'CNC', 'pending')""",
+            (line_id,),
+        )
+    again = persist_quote(make_quote(), task_id=task_id, file_hash="h-fk", quote_id=first["quote_id"])
+    assert again["quote_id"] == first["quote_id"]
+    row = conn.execute("SELECT quote_line_id FROM new_atom_suggestion WHERE source_text = 'CNC'").fetchone()
+    assert row["quote_line_id"] is None  # 先解引用，交给 sync_suggestions 重新挂到新明细行
+    conn.close()
+
+
 def test_find_quote_by_hash(prepared):
     conn, task_id = prepared
     assert find_quote_by_hash(conn, "hash-x") is None

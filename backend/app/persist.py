@@ -210,6 +210,13 @@ def persist_quote(
                     (*column_values, quote_id),
                 )
                 # 占位行重填：清掉旧明细（若有）再写入，保证幂等
+                # 新工艺建议（new_atom_suggestion）外键指向旧明细行：先解引用再删，否则
+                # 外键约束会让重填整条失败（sync_suggestions 之后会按 source_text 重新挂到新行）
+                conn.execute(
+                    """UPDATE new_atom_suggestion SET quote_line_id = NULL
+                       WHERE quote_line_id IN (SELECT id FROM quote_line WHERE quote_id = ?)""",
+                    (quote_id,),
+                )
                 conn.execute("DELETE FROM quote_line WHERE quote_id = ?", (quote_id,))
                 conn.execute("DELETE FROM tooling_line WHERE quote_id = ?", (quote_id,))
             else:

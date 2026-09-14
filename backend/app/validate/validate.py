@@ -87,26 +87,30 @@ def _within_tolerance(actual: float | None, expected: float) -> bool:
 def calc_check(data: dict) -> str:
     """勾稽校验（报价结构说明 §五）：模块 total ≥ Σitems；未税=六模块合计（排除税费），
     含税=未税+税额，最终=含税−折扣，允差 ±0.01 或 ±1%。全部只判 pass/fail，不阻断。"""
+    from app.derive import sga_untaxed_contribution, untaxed_total_candidates, untaxed_total_of
+
     up = data["unit_price"]
 
-    module_totals: dict[str, float | None] = {}
     for name in MODULES:
         module = up[name]
-        total = module_total(module)
-        module_totals[name] = total
-        if module.get("total") is not None and items_sum(module) > round(float(module["total"]) + 0.01, 6):
+        if module.get("total") is None:
+            continue
+        printed = round(float(module["total"]) + 0.01, 6)
+        if name == "sga_tax":
+            # sga_tax.total 口径不统一（可能不含单列的税费）：Σitems 或"非税费部分"任一不超 total 即一致
+            if items_sum(module) > printed and sga_untaxed_contribution(module) > printed:
+                return "fail"
+            continue
+        if items_sum(module) > printed:
             return "fail"
 
-    untaxed = sum(v or 0 for k, v in module_totals.items() if k != "sga_tax")
-    sga = up["sga_tax"]
-    sga_total = module_totals["sga_tax"] or 0
-    tax_items_sum = sum(
-        item.get("amount_per_pc") or 0 for item in sga.get("items") or [] if item.get("item_type") == "税费"
-    )
-    untaxed += sga_total - tax_items_sum
+    untaxed = untaxed_total_of(up)  # 与 derive 重算 summary 同口径
+    candidates = untaxed_total_candidates(up)  # 人工修正按模块 total 口径，两种口径都算合法
 
     summary = up["summary"]
-    if not _within_tolerance(summary.get("untaxed_total"), untaxed):
+    if summary.get("untaxed_total") is not None and not any(
+        _within_tolerance(summary["untaxed_total"], expected) for expected in candidates
+    ):
         return "fail"
 
     untaxed_used = summary["untaxed_total"] if summary.get("untaxed_total") is not None else untaxed

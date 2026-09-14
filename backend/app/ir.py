@@ -37,6 +37,8 @@ class IR:
     sheets: list[str]
     blocks: list[TextBlock] = field(default_factory=list)
     tables: list[TableRow] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    """接入层附注（如 `FORMULA 表!R9C19= =SUM(G9:R9)*1.13`）：只作线索提示，不是金额出处。"""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -53,4 +55,5 @@ class IR:
                 TableRow(sheet=t["sheet"], row_number=t["row_number"], cells=[CellValue(**c) for c in t["cells"]])
                 for t in data["tables"]
             ],
+            notes=list(data.get("notes") or []),
         )

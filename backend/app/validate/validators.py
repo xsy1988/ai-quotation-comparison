@@ -503,9 +503,21 @@ def validate_l2_reconcile(envelope: dict, ir: Any = None) -> list[Issue]:
             total = (up.get(name) or {}).get("total")
             return round(float(total), 6) if total is not None else 0.0
 
+        # sga_tax 口径与 derive.sga_untaxed_contribution 保持一致：优先"非税费条目之和"，
+        # 没有非税费条目时退回"模块 total − 税费条目之和"，避免与 derive 重算值判不一致
+        sga_untaxed = _sum_items("sga_tax", tax_only=False)
+        if not items_by_module["sga_tax"] or all(
+            item.get("item_type") == TAX_ITEM_TYPE for item in items_by_module["sga_tax"]
+        ):
+            sga_total = (up.get("sga_tax") or {}).get("total")
+            sga_untaxed = (
+                round(float(sga_total) - _sum_items("sga_tax", tax_only=True), 6)
+                if sga_total is not None
+                else 0.0
+            )
+
         untaxed = round(
-            sum(_module_sum(name) for name in untaxed_modules)
-            + _sum_items("sga_tax", tax_only=False),
+            sum(_module_sum(name) for name in untaxed_modules) + sga_untaxed,
             6,
         )
 
@@ -513,11 +525,14 @@ def validate_l2_reconcile(envelope: dict, ir: Any = None) -> list[Issue]:
             module = up.get(name) or {}
             total = module.get("total")
             items_sum = _sum_items(name)
-            if (
-                total is not None
-                and items_by_module[name]
-                and abs(float(total) - items_sum) > _tolerance(items_sum)
-            ):
+            if total is None or not items_by_module[name]:
+                continue
+            # sga_tax 的 total 口径不统一（可能已含单列的税费条目）：Σitems 或"非税费部分"任一
+            # 与 total 一致即视为相符，否则单据 04 这类"损管利税税前列示 + 单列增值税"会被误报。
+            candidates = {items_sum}
+            if name == "sga_tax":
+                candidates.add(_sum_items("sga_tax", tax_only=False))
+            if all(abs(float(total) - value) > _tolerance(value) for value in candidates):
                 issues.append(Issue(
                     path=f"{prefix}.unit_price.{name}.total", issue="module_total_mismatch",
                     detail=f"模块 total {total} 与去重后明细和 {items_sum} 不符",

@@ -283,7 +283,7 @@ def _fix_module_totals(offer: dict, derived: dict, conflicts: list[dict],
         if not items:
             continue
         items_sum = _items_sum(items)
-        if abs(float(total) - items_sum) <= _tolerance(items_sum):
+        if any(abs(float(total) - value) <= _tolerance(value) for value in _total_alternatives(items, items_sum)):
             if name in corrected:
                 # 上次调用已修正（total 现为 Σitems，无活冲突）：重放冲突明细，保证幂等
                 conflicts.append(
@@ -366,6 +366,20 @@ def _fix_module_totals(offer: dict, derived: dict, conflicts: list[dict],
         )
 
 
+def _total_alternatives(items: list[dict], items_sum: float) -> list[float]:
+    """模块 total 可接受的"明细和"口径候选。
+
+    sga_tax 的 total 常是"损管利税合计"（不含单列的税费），此时 total≠Σitems（Σitems 含税费）
+    属正常印法，不应记成 module_total 冲突（曾据此误报）。其余模块只有 Σitems 一种口径。
+    """
+    alternatives = [items_sum]
+    if any(item.get("item_type") == TAX_ITEM_TYPE for item in items):
+        non_tax = _items_sum([item for item in items if item.get("item_type") != TAX_ITEM_TYPE])
+        if non_tax != items_sum:
+            alternatives.append(non_tax)
+    return alternatives
+
+
 def _module_contribution(up: dict, name: str) -> float:
     """模块对未税总额的贡献：有明细按去重后明细金额（不用 total 字段，避免未修正的 total
     污染税额派生）；无明细的模块回退 total（唯一信息源，无去重/修正风险）。"""
@@ -376,19 +390,76 @@ def _module_contribution(up: dict, name: str) -> float:
     return round(float(module["total"]), 6) if module.get("total") is not None else 0.0
 
 
-def _untaxed_of(up: dict) -> float:
-    """未税总额：未税模块贡献 + sga_tax 中的非税费条目金额。"""
+def untaxed_total_of(up: dict) -> float:
+    """未税总额：未税模块贡献 + sga_tax 的非税费贡献。
+
+    derive 重算 summary 与 validate.calc_check 校验 summary 必须共用本函数：两个口径各算一套
+    是勾稽校验误报的根源（同一份单据被算出两个未税总额）。
+    """
     return round(
         sum(_module_contribution(up, name) for name in UNTAXED_MODULES)
-        + _items_sum(
-            [
-                item
-                for item in (up.get("sga_tax") or {}).get("items") or []
-                if item.get("item_type") != TAX_ITEM_TYPE
-            ]
-        ),
+        + sga_untaxed_contribution(up.get("sga_tax") or {}),
         6,
     )
+
+
+def untaxed_total_candidates(up: dict) -> list[float]:
+    """未税总额的可接受口径候选：明细口径优先，其次"单据模块 total"口径。
+
+    两套口径都是单据的真实印法（明细逐项列出 vs 只给模块合计），而人工修正的正是模块 total
+    （correction_service 以 total 为准重算），所以校验只要求 summary 落在任一口径上即可，
+    不能只认其中一个（曾据此误报 fail 与 module_total 冲突）。
+    """
+    items_based = untaxed_total_of(up)
+
+    def _total_of(name: str) -> float:
+        module = up.get(name) or {}
+        if module.get("total") is not None:
+            return float(module["total"])
+        items = module.get("items") or []
+        return _items_sum(items) if any(i.get("amount_per_pc") is not None for i in items) else 0.0
+
+    totals_based = sum(_total_of(name) for name in UNTAXED_MODULES)
+    sga = up.get("sga_tax") or {}
+    if sga.get("total") is not None:
+        tax_sum = sum(
+            float(item["amount_per_pc"])
+            for item in sga.get("items") or []
+            if item.get("item_type") == TAX_ITEM_TYPE and item.get("amount_per_pc") is not None
+        )
+        totals_based += float(sga["total"]) - tax_sum
+    else:
+        totals_based += sga_untaxed_contribution(sga)
+    totals_based = round(totals_based, 6)
+    return [items_based] if abs(totals_based - items_based) <= 1e-9 else [items_based, totals_based]
+
+
+def sga_untaxed_contribution(sga: dict) -> float:
+    """sga_tax 模块对未税总额的贡献（全库唯一口径，derive 与 validate.calc_check 共用）。
+
+    单据对"损管利税"这块的印法不统一：有的把"损管利税 2.85"与"增值税 2.04"分两行印（total
+    不含税费），有的把税费并进 total。统一取：有非税费明细 → Σ非税费明细；只有税费明细 →
+    total − Σ税费明细（total 缺失记 0）；无任何明细 → total（唯一信息源，同 _module_contribution）。
+    此前 derive 按明细、calc_check 按 total−税费，同一份单据被两个口径读出两个未税总额，
+    勾稽校验误报失败。
+    """
+    items = sga.get("items") or []
+    non_tax = [
+        float(item["amount_per_pc"])
+        for item in items
+        if item.get("item_type") != TAX_ITEM_TYPE and item.get("amount_per_pc") is not None
+    ]
+    if non_tax:
+        return round(sum(non_tax), 6)
+    tax_sum = sum(
+        float(item["amount_per_pc"])
+        for item in items
+        if item.get("item_type") == TAX_ITEM_TYPE and item.get("amount_per_pc") is not None
+    )
+    total = sga.get("total")
+    if total is None:
+        return 0.0
+    return round(float(total) - tax_sum, 6)
 
 
 def _tax_item_of(up: dict) -> dict | None:
@@ -461,7 +532,7 @@ def _fill_material_prices(offer: dict, derived: dict, conflicts: list[dict]) -> 
     candidate_sum = round(sum(found.values()), 6)
     summary = up.get("summary") or {}
     anchor = summary.get("final_unit_price_taxed")
-    untaxed_with = round(_untaxed_of(up) + candidate_sum, 6)
+    untaxed_with = round(untaxed_total_of(up) + candidate_sum, 6)
     tax = _estimated_tax(up, untaxed_with)
     expected = (
         round(untaxed_with + tax - float(summary.get("discount") or 0), 6)
@@ -509,7 +580,51 @@ def _fill_material_prices(offer: dict, derived: dict, conflicts: list[dict]) -> 
     )
 
 
-def _resolve_tax(offer: dict, derived: dict, conflicts: list[dict], untaxed: float) -> float | None:
+def _resolve_summary_tax(
+    offer: dict, derived: dict, conflicts: list[dict], untaxed: float, ir_values: set[float] | None
+) -> float | None:
+    """无 sga_tax 税费条目时：用单据汇总行印出的税额兜底（如「未税合计 13.66 / 增值税 1.78 /
+    含税单价 15.44」三行，行首栏目名单元格为空，版面理解把它们放进 summary 而不是 sga_tax 明细）。
+
+    此前只认 sga_tax 条目：印出来的税额被丢弃 → 含税合计算不出来、final_price 与勾稽校验
+    双双误报失败（单据 10 号实例）。采纳条件（保守，宁缺勿造）：
+    * 候选值 = 版面理解读到的 summary.tax_amount，且 > 0；
+    * 有 IR 时必须在 IR 数值中存在（容差 0.01）——即"单据上确实印了这个数"；
+    * 无 IR（回放/手工单据）时要求单据自身闭合：含税合计 − 未税合计 ≈ 候选值。
+    """
+    summary = (offer.get("unit_price") or {}).get("summary") or {}
+    try:
+        candidate = float(summary.get("tax_amount"))
+    except (TypeError, ValueError):
+        return None
+    if candidate <= 0:
+        return None
+    if ir_values is not None:
+        if not _has_provenance_in_ir(ir_values, candidate):
+            conflicts.append(
+                {
+                    "kind": "tax_amount",
+                    "module": "sga_tax",
+                    "document_value": candidate,
+                    "derived_value": None,
+                    "detail": f"汇总行税额 {candidate} 在单据中无出处，保持未印出（null）",
+                }
+            )
+            return None
+    else:
+        taxed = summary.get("taxed_total")
+        try:
+            closed = taxed is not None and abs((float(taxed) - untaxed) - candidate) <= _tolerance(candidate)
+        except (TypeError, ValueError):
+            closed = False
+        if not closed:
+            return None
+    derived["summary_tax_amount"] = candidate
+    return round(candidate, 6)
+
+
+def _resolve_tax(offer: dict, derived: dict, conflicts: list[dict], untaxed: float,
+                 ir_values: set[float] | None = None) -> float | None:
     """规则 C + 税费决策：无出处金额视为缺失按税率派生；有出处单据值优先（不符只打标）。"""
     up = offer["unit_price"]
     sga_items = (up.get("sga_tax") or {}).get("items") or []
@@ -524,9 +639,13 @@ def _resolve_tax(offer: dict, derived: dict, conflicts: list[dict], untaxed: flo
         elif tax_item is not None and tax_item.get("rate") is not None:
             tax_amount = round(float(tax_item["rate"]) * untaxed, 6)
             tax_item["amount_per_pc"] = tax_amount
+        else:
+            tax_amount = derived.get("summary_tax_amount")  # 回放：沿用首轮从汇总行采纳的税额
         derived["tax_derived"] = True
         return tax_amount
-    if tax_item is not None and tax_item.get("amount_per_pc") is not None:
+    if tax_item is None:
+        return _resolve_summary_tax(offer, derived, conflicts, untaxed, ir_values)
+    if tax_item.get("amount_per_pc") is not None:
         amount = float(tax_item["amount_per_pc"])
         raw_text = (tax_item.get("evidence") or {}).get("raw_text")
         if amount == 0 and tax_item.get("rate") is not None:
@@ -600,13 +719,14 @@ def derive_offer(offer: dict, ir=None) -> list[str]:
     _fill_material_prices(offer, derived, conflicts)
 
     # 未税总额：有明细的模块按去重后明细金额（不用 total 字段，避免未修正的 total 污染税额派生）
-    untaxed = _untaxed_of(up)
+    untaxed = untaxed_total_of(up)
+    ir_values = _ir_numeric_values(ir)
 
     # 规则 C + 税费决策（sga_tax 的 total 在税费修正后于规则 B 中重算 Σitems）
-    tax_amount = _resolve_tax(offer, derived, conflicts, untaxed)
+    tax_amount = _resolve_tax(offer, derived, conflicts, untaxed, ir_values)
 
     # 规则 B：模块 total（ir 提供时按出处判定；sga_tax 此时已含修正后税费金额）
-    _fix_module_totals(offer, derived, conflicts, _ir_numeric_values(ir))
+    _fix_module_totals(offer, derived, conflicts, ir_values)
 
     # summary 全量重算，final/discount 保留单据值
     summary = up["summary"]

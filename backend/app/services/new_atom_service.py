@@ -45,10 +45,13 @@ def sync_suggestions(conn: sqlite3.Connection, task_id: int) -> int:
     for group in groups:
         existing = conn.execute(
             """SELECT ns.id, ns.status FROM new_atom_suggestion ns
-               JOIN quote_line ql ON ns.quote_line_id = ql.id
-               JOIN quote q ON ql.quote_id = q.id
-               WHERE q.task_id = ? AND ns.source_text = ?""",
-            (task_id, group["item_name"]),
+               WHERE ns.source_text = ?
+                 AND (ns.quote_line_id IS NULL
+                      OR ns.quote_line_id IN (
+                          SELECT ql.id FROM quote_line ql
+                          JOIN quote q ON ql.quote_id = q.id
+                          WHERE q.task_id = ?))""",
+            (group["item_name"], task_id),
         ).fetchone()
         if existing is None:
             with conn:

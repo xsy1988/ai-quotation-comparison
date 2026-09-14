@@ -18,10 +18,10 @@
 
     "basic": {
       "type": "object",
-      "required": ["part_name", "currency"],
+      "required": ["currency"],
       "properties": {
         "project_name":  { "type": ["string", "null"] },
-        "part_name":     { "type": "string", "description": "零件名称" },
+        "part_name":     { "type": ["string", "null"], "description": "零件名称（单据未印出时为 null）" },
         "scheme":        { "type": ["string", "null"], "description": "报价方案标识：同一产品多方案报价时区分各方案（取自原表方案列/品名/备注或工艺路线简述，如\"方案1\"）；单方案为 null" },
         "material_spec": { "type": ["string", "null"], "description": "材料规格（原文）" },
         "quote_date":    { "type": ["string", "null"], "format": "date" },
