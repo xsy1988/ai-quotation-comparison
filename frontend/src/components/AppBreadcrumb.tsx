@@ -48,13 +48,12 @@ function crumbsOf(pathname: string): Crumb[] {
   return crumbs
 }
 
-/** 顶部面包屑：一眼看清当前页面在站点里的层级 */
+/** 顶部面包屑：一眼看清当前页面在站点里的层级。渲染在顶栏内，由顶栏负责留白 */
 export default function AppBreadcrumb() {
   const { pathname } = useLocation()
   const crumbs = crumbsOf(pathname)
   return (
     <Breadcrumb
-      style={{ marginBottom: 12 }}
       items={crumbs.map((crumb, index) => ({
         title:
           crumb.to && index !== crumbs.length - 1 ? (

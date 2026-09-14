@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { App as AntdApp, Layout, Menu, Typography } from 'antd'
+import { App as AntdApp, Layout, Menu } from 'antd'
 import {
   AppstoreOutlined,
   DatabaseOutlined,
@@ -15,6 +15,9 @@ const { Header, Sider, Content } = Layout
 
 /** 顶部栏与左侧 logo 区统一高度：两侧顶边对齐，不出现一高一矮 */
 const HEADER_HEIGHT = 64
+
+/** 顶部栏与内容区共用同一限宽，保证面包屑与页面内容左右对齐 */
+const CONTENT_MAX_WIDTH = 1440
 
 /** 左侧菜单：key 为路由前缀，最长前缀匹配决定选中项 */
 const NAV_ITEMS = [
@@ -96,19 +99,33 @@ export default function App() {
           style={{
             background: '#fff',
             borderBottom: '1px solid #f0f0f0',
-            paddingInline: 24,
+            // antd 默认给 Header 加了 0 50px 内边距，会与限宽容器叠加导致面包屑比内容右移，这里清掉
+            padding: 0,
             height: HEADER_HEIGHT,
-            lineHeight: `${HEADER_HEIGHT}px`,
             display: 'flex',
             alignItems: 'center',
           }}
         >
-          <Typography.Text type="secondary">
-            上传多家供应商报价单，自动解析并生成比价界面
-          </Typography.Text>
+          <div
+            style={{
+              maxWidth: CONTENT_MAX_WIDTH,
+              width: '100%',
+              margin: '0 auto',
+              paddingInline: 24,
+              boxSizing: 'border-box',
+            }}
+          >
+            <AppBreadcrumb />
+          </div>
         </Header>
-        <Content style={{ padding: 24, maxWidth: 1440, width: '100%', margin: '0 auto' }}>
-          <AppBreadcrumb />
+        <Content
+          style={{
+            padding: 24,
+            maxWidth: CONTENT_MAX_WIDTH,
+            width: '100%',
+            margin: '0 auto',
+          }}
+        >
           <Outlet />
         </Content>
       </Layout>
