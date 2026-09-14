@@ -8,6 +8,7 @@ import HierarchyTable from '../components/HierarchyTable'
 import DrawerTabs from '../components/DrawerTabs'
 import FingerprintTable from '../components/FingerprintTable'
 import AiAnalysisSection from '../components/AiAnalysisSection'
+import MasterMatchCard from '../components/MasterMatchCard'
 import NewProcessCard from '../components/NewProcessCard'
 import { calcAbnormalSuppliers, warningSuppliers } from '../components/compareUtils'
 import SupplierCategorySelect from '../components/SupplierCategorySelect'
@@ -127,6 +128,8 @@ export default function ComparisonPage() {
               <HierarchyTable comparison={data} highlighted={highlighted} />
             )}
           </Card>
+
+          <MasterMatchCard taskId={taskId} />
 
           <Card
             title={`任务 #${data.task_id} 比价结果`}

@@ -1,7 +1,8 @@
-"""主数据管理 API（第 9 步）：原子 / 别名 / 品类 / 抽屉分组 / 供应商的 CRUD。
+"""主数据管理 API（第 9 步）：原子 / 别名 / 品类 / 抽屉分组 / 供应商 / 项目的 CRUD。
 
 - 独立命名空间 /api/master/*，不动前端在用的 /api/atoms、/api/categories 等只读接口；
 - 原子编码自动生成：复用 new_atom_service._next_atom_code（域内 max+1，撞号重试）；
+- 供应商/项目编码自动生成（SUP-xxx / PRJ-xxx），注册时按名称归一化去重并绑定报价单；
 - 删除保护：被业务数据（quote_line / atom_category / atom_alias / comparison_task / quote 等）
   引用的主数据禁止删除，返回 409 + 中文提示；DB 层 IntegrityError 统一转 409。
 """
@@ -14,6 +15,17 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import get_connection, init_db
+from app.services.master_binding import (
+    MasterBindingConflict,
+    MasterBindingError,
+    bind_project_codes,
+    bind_supplier_codes,
+    create_project,
+    project_quote_count,
+    project_to_dict,
+    register_supplier,
+    unbind_project_codes,
+)
 from app.services.new_atom_service import _next_atom_code
 
 router = APIRouter(prefix="/api/master", tags=["master"])
@@ -812,14 +824,17 @@ def delete_dim_group(group_code: str) -> dict:
 # ========== 供应商 ==========
 
 
-def _supplier_to_dict(row: sqlite3.Row) -> dict:
-    return {
+def _supplier_to_dict(row: sqlite3.Row, quote_count: int | None = None) -> dict:
+    data = {
         "code": row["code"],
         "name": row["name"],
         "alias": row["alias"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+    if quote_count is not None:
+        data["quote_count"] = quote_count
+    return data
 
 
 @router.get("/suppliers")
@@ -836,7 +851,15 @@ def list_suppliers(q: str = Query(default="")) -> dict:
                 (q, like, like, like),
             )
         )
-        return {"suppliers": [_supplier_to_dict(row) for row in rows]}
+        counts = {
+            row["supplier_code"]: row["n"]
+            for row in conn.execute(
+                """SELECT supplier_code, COUNT(*) AS n FROM quote
+                   WHERE supplier_code IS NOT NULL AND parse_status IN ('parsed', 'reviewed')
+                   GROUP BY supplier_code"""
+            )
+        }
+        return {"suppliers": [_supplier_to_dict(row, counts.get(row["code"], 0)) for row in rows]}
     finally:
         conn.close()
 
@@ -926,3 +949,210 @@ def delete_supplier(code: str) -> dict:
         raise _conflict(f"供应商已被引用，禁止删除：{e}")
     finally:
         conn.close()
+
+
+class SupplierRegister(BaseModel):
+    """比价页面「加入管理」：按识别名注册（同名复用），并绑定这些报价单。"""
+
+    name: str
+    alias: str | None = None
+    quote_ids: list[int] = []
+
+
+@router.post("/suppliers/register")
+def register_supplier_endpoint(body: SupplierRegister) -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        return register_supplier(conn, body.name, body.alias, body.quote_ids)
+    except MasterBindingError as e:
+        raise _bad(str(e))
+    except sqlite3.IntegrityError as e:
+        raise _conflict(f"数据冲突：{e}")
+    finally:
+        conn.close()
+
+
+class QuoteIds(BaseModel):
+    quote_ids: list[int]
+
+
+@router.post("/suppliers/{code}/bind")
+def bind_supplier_endpoint(code: str, body: QuoteIds) -> dict:
+    """把已有主数据供应商关联到识别名不一致的报价单。"""
+    init_db()
+    conn = get_connection()
+    try:
+        if conn.execute("SELECT 1 FROM supplier WHERE code = ?", (code,)).fetchone() is None:
+            raise _not_found("供应商", code)
+        return {"code": code, "bound_quotes": bind_supplier_codes(conn, code, body.quote_ids)}
+    except MasterBindingError as e:
+        raise _bad(str(e))
+    finally:
+        conn.close()
+
+
+# ========== 项目（公司内部的具体 SKU） ==========
+
+
+def _project_row(conn: sqlite3.Connection, code: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM project WHERE code = ?", (code,)).fetchone()
+
+
+def _check_category(conn: sqlite3.Connection, category_code: str | None) -> None:
+    if category_code and conn.execute(
+        "SELECT 1 FROM category WHERE code = ?", (category_code,)
+    ).fetchone() is None:
+        raise _bad(f"品类不存在：{category_code}")
+
+
+@router.get("/projects")
+def list_projects(q: str = Query(default="")) -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        like = f"%{q}%"
+        rows = conn.execute(
+            """SELECT * FROM project
+               WHERE ? = '' OR code LIKE ? OR name LIKE ? OR IFNULL(remark, '') LIKE ?
+               ORDER BY code""",
+            (q, like, like, like),
+        )
+        return {
+            "projects": [
+                project_to_dict(row, project_quote_count(conn, row["code"])) for row in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+class ProjectCreate(BaseModel):
+    name: str
+    code: str | None = None
+    category_code: str | None = None
+    remark: str | None = None
+    quote_ids: list[int] = []
+
+
+@router.post("/projects", status_code=201)
+def create_project_endpoint(body: ProjectCreate) -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        _check_category(conn, body.category_code)
+        return create_project(
+            conn,
+            body.name,
+            body.category_code,
+            body.remark,
+            body.quote_ids,
+            code=(body.code or "").strip() or None,
+        )
+    except MasterBindingConflict as e:
+        raise _conflict(str(e))
+    except MasterBindingError as e:
+        raise _bad(str(e))
+    except sqlite3.IntegrityError as e:
+        raise _conflict(f"数据冲突：{e}")
+    finally:
+        conn.close()
+
+
+class ProjectPatch(BaseModel):
+    name: str | None = None
+    category_code: str | None = None
+    remark: str | None = None
+
+    def to_patch(self) -> dict:
+        """只取显式传入的字段；空字符串一律视为「清空」（转 NULL），便于解除品类/备注。"""
+        patch = {}
+        for key in self.model_fields_set:
+            value = getattr(self, key)
+            if isinstance(value, str):
+                value = value.strip() or None
+            patch[key] = value
+        return patch
+
+
+@router.patch("/projects/{code}")
+def patch_project(code: str, body: ProjectPatch) -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        if _project_row(conn, code) is None:
+            raise _not_found("项目", code)
+        patch = body.to_patch()
+        if "name" in patch:
+            name = (patch["name"] or "").strip()
+            if not name:
+                raise _bad("字段 name 不能为空")
+            patch["name"] = name
+            dup = conn.execute(
+                "SELECT code FROM project WHERE name = ? AND code <> ?", (name, code)
+            ).fetchone()
+            if dup:
+                raise _bad(f"项目名称已存在：{name}")
+        if "category_code" in patch:
+            _check_category(conn, patch["category_code"])
+        if patch:
+            assignments = ", ".join(f"{k} = ?" for k in patch)
+            with conn:
+                conn.execute(
+                    f"""UPDATE project SET {assignments},
+                        updated_at = datetime('now', 'localtime') WHERE code = ?""",
+                    (*patch.values(), code),
+                )
+        return project_to_dict(_project_row(conn, code), project_quote_count(conn, code))
+    except sqlite3.IntegrityError as e:
+        raise _conflict(f"数据冲突：{e}")
+    finally:
+        conn.close()
+
+
+@router.delete("/projects/{code}")
+def delete_project(code: str) -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        if _project_row(conn, code) is None:
+            raise _not_found("项目", code)
+        quotes = project_quote_count(conn, code)
+        if quotes > 0:
+            raise _conflict(f"项目已被 {quotes} 张报价单引用，请先解绑")
+        with conn:
+            conn.execute("DELETE FROM project WHERE code = ?", (code,))
+        return {"code": code, "deleted": True}
+    except sqlite3.IntegrityError as e:
+        raise _conflict(f"项目已被引用，禁止删除：{e}")
+    finally:
+        conn.close()
+
+
+@router.post("/projects/{code}/bind")
+def bind_project_endpoint(code: str, body: QuoteIds) -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        if _project_row(conn, code) is None:
+            raise _not_found("项目", code)
+        return {"code": code, "bound_quotes": bind_project_codes(conn, code, body.quote_ids)}
+    except MasterBindingError as e:
+        raise _bad(str(e))
+    finally:
+        conn.close()
+
+
+@router.post("/projects/{code}/unbind")
+def unbind_project_endpoint(code: str, body: QuoteIds) -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        if _project_row(conn, code) is None:
+            raise _not_found("项目", code)
+        return {"code": code, "unbound_quotes": unbind_project_codes(conn, code, body.quote_ids)}
+    except MasterBindingError as e:
+        raise _bad(str(e))
+    finally:
+        conn.close()
+

@@ -15,6 +15,7 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import {
   createMasterAlias,
   createMasterAtom,
@@ -1237,6 +1238,17 @@ function SupplierTab() {
     { title: '编码', dataIndex: 'code', width: 140 },
     { title: '名称', dataIndex: 'name' },
     { title: '别名', dataIndex: 'alias', render: (v: string | null) => v ?? '—' },
+    {
+      title: '历史报价',
+      key: 'history',
+      width: 150,
+      render: (_, record) => (
+        <Space size={6}>
+          <Typography.Text type="secondary">{record.quote_count ?? 0} 份</Typography.Text>
+          <Link to={`/suppliers/${record.code}`}>曲线</Link>
+        </Space>
+      ),
+    },
     { title: '创建时间', dataIndex: 'created_at', width: 160 },
     {
       title: '操作',

@@ -100,6 +100,17 @@ CREATE TABLE IF NOT EXISTS supplier (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+-- 项目 = 公司内部的一个具体 SKU 产品；报价单识别出的项目名按名称归一化后绑定到这里
+CREATE TABLE IF NOT EXISTS project (
+    code         TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    category_code TEXT REFERENCES category(code),
+    remark       TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_name ON project(name);
+
 -- ========== 业务数据表 ==========
 
 CREATE TABLE IF NOT EXISTS comparison_task (
@@ -117,6 +128,7 @@ CREATE TABLE IF NOT EXISTS quote (
     task_id                  INTEGER NOT NULL REFERENCES comparison_task(id),
     supplier_code            TEXT REFERENCES supplier(code),
     supplier_name            TEXT,            -- 冗余：新供应商 code 为 null 时对比仍显示名字
+    project_code             TEXT REFERENCES project(code),  -- 绑定的项目（SKU），未匹配为 null
     category_code            TEXT REFERENCES category(code),
     basic_info               TEXT,            -- JSON：项目/零件/币种/MOQ 等基本信息
     final_unit_price_taxed   REAL,
@@ -141,6 +153,8 @@ CREATE TABLE IF NOT EXISTS quote (
     updated_at               TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_quote_task ON quote(task_id);
+CREATE INDEX IF NOT EXISTS idx_quote_supplier ON quote(supplier_code);
+CREATE INDEX IF NOT EXISTS idx_quote_project ON quote(project_code);
 
 CREATE TABLE IF NOT EXISTS quote_line (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -15,6 +15,8 @@ import type {
   MasterCategory,
   MasterDimGroup,
   MasterDrawer,
+  MasterMatch,
+  MasterProject,
   MasterSupplier,
   NewAtomSuggestion,
   ProgressPayload,
@@ -25,6 +27,8 @@ import type {
   QuotePatch,
   QuotePatchResult,
   SuggestionResolveResult,
+  SupplierHistory,
+  SupplierRegisterResult,
   TaskListItem,
 } from '../types'
 
@@ -353,6 +357,107 @@ export async function patchMasterSupplier(
 
 export async function deleteMasterSupplier(code: string): Promise<void> {
   await http.delete(`/api/master/suppliers/${encodeURIComponent(code)}`)
+}
+
+// ---------- 供应商 / 项目绑定（比价页「供应商 / 项目管理」模块） ----------
+
+export async function getMasterMatch(taskId: number): Promise<MasterMatch> {
+  const { data } = await http.get<MasterMatch>(`/api/tasks/${taskId}/master-match`)
+  return data
+}
+
+export async function registerMasterSupplier(payload: {
+  name: string
+  alias?: string
+  quote_ids?: number[]
+}): Promise<SupplierRegisterResult> {
+  const { data } = await http.post<SupplierRegisterResult>('/api/master/suppliers/register', payload)
+  return data
+}
+
+export async function bindMasterSupplier(
+  code: string,
+  quoteIds: number[],
+): Promise<{ code: string; bound_quotes: number }> {
+  const { data } = await http.post<{ code: string; bound_quotes: number }>(
+    `/api/master/suppliers/${encodeURIComponent(code)}/bind`,
+    { quote_ids: quoteIds },
+  )
+  return data
+}
+
+export async function listMasterProjects(q: string): Promise<MasterProject[]> {
+  const { data } = await http.get<{ projects: MasterProject[] }>('/api/master/projects', {
+    params: { q },
+  })
+  return data.projects
+}
+
+export async function createMasterProject(payload: {
+  name: string
+  code?: string
+  category_code?: string
+  remark?: string
+  quote_ids?: number[]
+}): Promise<MasterProject> {
+  const { data } = await http.post<MasterProject>('/api/master/projects', payload)
+  return data
+}
+
+export async function patchMasterProject(
+  code: string,
+  patch: { name?: string; category_code?: string; remark?: string },
+): Promise<MasterProject> {
+  const { data } = await http.patch<MasterProject>(
+    `/api/master/projects/${encodeURIComponent(code)}`,
+    patch,
+  )
+  return data
+}
+
+export async function deleteMasterProject(code: string): Promise<void> {
+  await http.delete(`/api/master/projects/${encodeURIComponent(code)}`)
+}
+
+export async function bindMasterProject(
+  code: string,
+  quoteIds: number[],
+): Promise<{ code: string; bound_quotes: number }> {
+  const { data } = await http.post<{ code: string; bound_quotes: number }>(
+    `/api/master/projects/${encodeURIComponent(code)}/bind`,
+    { quote_ids: quoteIds },
+  )
+  return data
+}
+
+export async function unbindMasterProject(
+  code: string,
+  quoteIds: number[],
+): Promise<{ code: string; unbound_quotes: number }> {
+  const { data } = await http.post<{ code: string; unbound_quotes: number }>(
+    `/api/master/projects/${encodeURIComponent(code)}/unbind`,
+    { quote_ids: quoteIds },
+  )
+  return data
+}
+
+// ---------- 供应商历史报价曲线 ----------
+
+export async function getSupplierHistory(
+  code: string,
+  params: {
+    metrics?: string
+    category_code?: string
+    date_from?: string
+    date_to?: string
+    compare_code?: string
+  } = {},
+): Promise<SupplierHistory> {
+  const { data } = await http.get<SupplierHistory>(
+    `/api/suppliers/${encodeURIComponent(code)}/history`,
+    { params },
+  )
+  return data
 }
 
 /**

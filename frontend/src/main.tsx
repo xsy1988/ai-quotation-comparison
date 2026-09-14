@@ -16,6 +16,8 @@ import MasterPage from './pages/MasterPage'
 import TaskHistoryPage from './pages/TaskHistoryPage'
 import QuoteListPage from './pages/QuoteListPage'
 import QuoteDetailPage from './pages/QuoteDetailPage'
+import ProjectPage from './pages/ProjectPage'
+import SupplierHistoryPage from './pages/SupplierHistoryPage'
 
 dayjs.locale('zh-cn')
 
@@ -65,6 +67,8 @@ export default function Main() {
               <Route path="quotes" element={<QuoteListPage />} />
               <Route path="quotes/:id" element={<QuoteDetailPage />} />
               <Route path="suppliers" element={<MasterPage section="suppliers" />} />
+              <Route path="suppliers/:code" element={<SupplierHistoryPage />} />
+              <Route path="projects" element={<ProjectPage />} />
               <Route path="master" element={<Navigate to="/master/atoms" replace />} />
               <Route path="master/atoms" element={<MasterPage section="atoms" />} />
               <Route path="master/aliases" element={<MasterPage section="aliases" />} />

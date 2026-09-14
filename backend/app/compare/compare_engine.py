@@ -41,8 +41,8 @@ def _task_quotes(conn: sqlite3.Connection, task_id: int) -> list[sqlite3.Row]:
     """
     rows = list(
         conn.execute(
-            "SELECT id, supplier_name, supplier_code, flags, calc_check, final_unit_price_taxed,"
-            " category_code, basic_info, other_info"
+            "SELECT id, supplier_name, supplier_code, project_code, flags, calc_check,"
+            " final_unit_price_taxed, category_code, basic_info, other_info"
             " FROM quote WHERE task_id = ? AND parse_status IN ('parsed', 'reviewed') ORDER BY id",
             (task_id,),
         )
@@ -72,6 +72,7 @@ def _suppliers(quotes: list[sqlite3.Row]) -> list[dict]:
                 "quote_id": row["id"],
                 "supplier_name": row["supplier_name"],
                 "supplier_code": row["supplier_code"],
+                "project_code": row["project_code"],
                 "part_name": basic.get("part_name"),
                 "scheme": basic.get("scheme"),
                 "moq": basic.get("moq"),

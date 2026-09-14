@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { App as AntdApp, Layout, Menu, Typography } from 'antd'
 import {
+  AppstoreOutlined,
   DatabaseOutlined,
   FolderOpenOutlined,
   HistoryOutlined,
@@ -17,6 +18,7 @@ const NAV_ITEMS = [
   { key: '/tasks', label: <Link to="/tasks">报价对比历史</Link>, icon: <HistoryOutlined /> },
   { key: '/quotes', label: <Link to="/quotes">报价单数据</Link>, icon: <DatabaseOutlined /> },
   { key: '/suppliers', label: <Link to="/suppliers">供应商管理</Link>, icon: <ShopOutlined /> },
+  { key: '/projects', label: <Link to="/projects">项目管理</Link>, icon: <AppstoreOutlined /> },
   {
     key: '/master',
     label: '基础数据维护',

@@ -9,6 +9,7 @@ from .api import (
     master_router,
     quotes_router,
     suggestions_router,
+    suppliers_router,
     tasks_router,
 )
 from .config import settings
@@ -36,6 +37,7 @@ app.include_router(corrections_router)
 app.include_router(suggestions_router)
 app.include_router(master_router)
 app.include_router(quotes_router)
+app.include_router(suppliers_router)
 
 
 @app.get("/health")

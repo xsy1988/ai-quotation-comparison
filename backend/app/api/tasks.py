@@ -10,6 +10,7 @@ from app.compare.compare_engine import get_comparison
 from app.db import get_connection, init_db
 from app.llm.client import LLMError
 from app.pipeline.pipeline import create_task, run_task
+from app.services.master_binding import task_master_match as task_master_match_service
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -153,6 +154,18 @@ def task_comparison(task_id: int) -> dict:
     try:
         _task_or_404(conn, task_id)
         return get_comparison(conn, task_id)
+    finally:
+        conn.close()
+
+
+@router.get("/{task_id}/master-match")
+def task_master_match(task_id: int) -> dict:
+    """比价页「供应商 / 项目管理」模块：列出任务内识别到的未管理供应商与未绑定项目。"""
+    init_db()
+    conn = get_connection()
+    try:
+        _task_or_404(conn, task_id)
+        return task_master_match_service(conn, task_id)
     finally:
         conn.close()
 

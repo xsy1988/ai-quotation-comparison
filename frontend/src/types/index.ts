@@ -521,6 +521,90 @@ export interface MasterSupplier {
   alias: string | null
   created_at: string
   updated_at: string
+  /** 已绑定（已管理）的报价单数量；仅列表接口返回 */
+  quote_count?: number
+}
+
+// ---------- 供应商 / 项目绑定（迭代：供应商管理深入 + 新增业务数据项目） ----------
+
+/** 比价页面任务内的一个供应商分组（按识别名归一化聚合） */
+export interface MasterMatchSupplier {
+  name: string
+  normalized: string
+  quote_ids: number[]
+  quote_count: number
+  part_names: string[]
+  /** 该供应商在本任务出现过的品类编码（单一品类时用于预选历史曲线的品类筛选） */
+  categories: string[]
+  managed: boolean
+  supplier_code: string | null
+  supplier_name: string | null
+}
+
+/** 报价单识别出的项目名分组（项目 = 公司内部的一个 SKU） */
+export interface MasterMatchProject {
+  name: string
+  normalized: string
+  quote_ids: number[]
+  quote_count: number
+  bound: boolean
+  project_code: string | null
+  project_name: string | null
+}
+
+export interface MasterMatch {
+  task_id: number
+  suppliers: MasterMatchSupplier[]
+  projects: MasterMatchProject[]
+  unmanaged_supplier_count: number
+  unbound_project_count: number
+}
+
+export interface MasterProject {
+  code: string
+  name: string
+  category_code: string | null
+  remark: string | null
+  created_at: string
+  updated_at: string
+  quote_count?: number
+}
+
+export interface SupplierRegisterResult {
+  code: string
+  name: string
+  alias: string | null
+  created: boolean
+  bound_quotes: number
+}
+
+export interface SupplierHistoryPoint {
+  supplier_code: string
+  supplier_name: string | null
+  quote_id: number
+  task_id: number
+  /** 报价日期（quote_date）；缺失时为录入日期，date_source 标注来源 */
+  date: string
+  date_source: 'quote' | 'created'
+  category_code: string | null
+  category_name: string | null
+  project_name: string | null
+  part_name: string | null
+  scheme: string | null
+  /** 指标 key -> 金额（null = 未识别） */
+  metrics: Record<string, number | null>
+}
+
+export interface SupplierHistory {
+  supplier: { code: string; name: string }
+  compare_supplier: { code: string; name: string } | null
+  metrics: { key: string; label: string }[]
+  metric_options: { key: string; label: string }[]
+  categories: { code: string; name: string }[]
+  points: SupplierHistoryPoint[]
+  quote_count: number
+  /** 当前筛选条件命中的报价单数（quote_count 为供应商报价单总数） */
+  filtered_count: number
 }
 
 export interface MasterAtomCreatePayload {
