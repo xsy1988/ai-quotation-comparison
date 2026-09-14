@@ -6,10 +6,13 @@ import type { Comparison, PriceTreeNode, ProcessingItem, Supplier } from '../typ
 import Amount, { NA_TEXT } from './Amount'
 import ProcessingItemCell from './ProcessingItemCell'
 import {
-  SUPPLIER_COL_MIN_WIDTH,
   supplierColumnGroups,
   supplierSeparatorStyle,
+  useSupplierColumnFit,
 } from './compareUtils'
+
+/** 「项目」固定列宽度 */
+const LABEL_COL_WIDTH = 280
 
 const NA_DETAIL_TEXT = '/'
 
@@ -120,8 +123,10 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
   const { suppliers, price_tree } = comparison
   const [procScope, setProcScope] = useState<ProcScope>('domain')
 
-  // 供应商列分组（同一供应商的报价列由后端排在相邻位置）：组间画分隔线 + 列最小宽度
+  // 供应商列分组（同一供应商的报价列由后端排在相邻位置）：组间画分隔线 + 列宽度
   const groups = useMemo(() => supplierColumnGroups(suppliers), [suppliers])
+  // 列宽自适应：每列不小于「一行 10 个汉字」，放得下就撑满一屏，放不下才左右拖动
+  const fit = useSupplierColumnFit(suppliers.length, LABEL_COL_WIDTH)
 
   const tree = useMemo(() => {
     // 加工费节点嵌套在 unit_price 下，需递归变换
@@ -206,7 +211,7 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
       title: '项目',
       key: 'label',
       fixed: 'left',
-      width: 280,
+      width: LABEL_COL_WIDTH,
       render: (_: unknown, node) => {
         // 生产加工费分组行：行内靠右放下拉按钮切换 工艺域/阶段/类别
         if (node.key === 'processing') {
@@ -251,7 +256,7 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
         return tips.length > 0 ? <Tooltip title={tips.join('；')}>{label}</Tooltip> : label
       },
     },
-    ...suppliers.map((s: Supplier) => ({
+    ...suppliers.map((s: Supplier, index: number) => ({
       title: (
         <span>
           {highlighted.has(s.quote_id) && (
@@ -269,8 +274,8 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
       ),
       key: `q${s.quote_id}`,
       align: 'right' as const,
-      // 列最小宽度：宽度不够时表体左右拖动；tableLayout=auto 由 rc-table 落到 <col min-width>
-      minWidth: SUPPLIER_COL_MIN_WIDTH,
+      // 显式等宽：rc-table 走 tableLayout=fixed，避免 max-content 把窄列撑到和内容一样宽
+      width: fit.widthOf(index),
       onHeaderCell: () => ({ style: supplierSeparatorStyle(groups.get(s.quote_id)) }),
       // 产品单价行最低价单元格：浅绿底标识（内联样式，压过层级底色）；组首列加分隔线
       onCell: (node: PriceTreeNode) => ({
@@ -286,7 +291,16 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
         const meta = node.meta?.[String(s.quote_id)]
 
         if (node.kind === 'text') {
-          return raw === null || raw === undefined ? '—' : String(raw)
+          if (raw === null || raw === undefined) return '—'
+          const text = String(raw)
+          // 起订量分档等多行文本：按 \n 折行展示
+          return text.includes('\n') ? (
+            <span style={{ whiteSpace: 'pre-line', textAlign: 'left', display: 'inline-block' }}>
+              {text}
+            </span>
+          ) : (
+            text
+          )
         }
 
         const value = typeof raw === 'number' ? raw : null
@@ -355,7 +369,7 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
   ]
 
   return (
-    <>
+    <div ref={fit.ref}>
       <Table<PriceTreeNode>
         size="middle"
         rowKey="key"
@@ -365,8 +379,8 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
         bordered
         sticky
         rowClassName={rowClassName}
-        // 供应商多时左右拖动；项目列固定，供应商列最小宽度由 minWidth 保证
-        scroll={{ x: 'max-content' }}
+        // 供应商多时左右拖动；项目列固定，供应商列宽由 useSupplierColumnFit 计算
+        scroll={{ x: fit.scrollX }}
         expandable={{
           expandedRowKeys: expandedKeys,
           onExpandedRowsChange: (keys) => setExpandedKeys(keys as string[]),
@@ -379,6 +393,6 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
       >
         同一供应商的多份报价列已相邻排列（灰色竖线分组）· 列较多时可左右拖动查看
       </Typography.Text>
-    </>
+    </div>
   )
 }

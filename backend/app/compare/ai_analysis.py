@@ -125,6 +125,8 @@ def _supplier_entries(comparison: dict, lines: list[list]) -> list[dict]:
                 "is_lowest": rank_of[qid] == 1 and s["final_unit_price_taxed"] is not None,
                 "calc_check": s["calc_check"],
                 "flags": s["flags"],
+                "moq": s.get("moq"),
+                "moq_options": s.get("moq_options"),
                 "modules": module_totals.get(qid, {}),
                 "other_info": s.get("other_info"),
             }
@@ -179,7 +181,6 @@ def build_input(conn: sqlite3.Connection, comparison: dict) -> dict:
             "material_spec": base.get("material_spec"),
             "quote_date": base.get("quote_date"),
             "currency": base.get("currency"),
-            "moq": base.get("moq"),
         },
         "suppliers": entries,
         "summary_rows": [

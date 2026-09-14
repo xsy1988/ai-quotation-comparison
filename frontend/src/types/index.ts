@@ -11,6 +11,8 @@ export interface Supplier {
   calc_check: string | null
   final_unit_price_taxed: number | null
   category_code: string | null
+  moq: number | null
+  moq_options: MoqOption[] | null
 }
 
 /** hierarchy[].key ∈ HIERARCHY_ROWS：六个模块合计 + 汇总行 */
@@ -57,6 +59,13 @@ export interface ProcessingDetail {
 
 // ---------- 层级金额对比树（price_tree，get_comparison 新增字段） ----------
 
+/** 同一产品不同情况下的起订量档位（如「皮革现货单色 3,000」） */
+export interface MoqOption {
+  condition: string | null
+  value: number
+  note: string | null
+}
+
 /** 每供应商基本信息（quote.basic_info 解析，字段缺失为 null） */
 export interface BasicInfo {
   quote_id: number
@@ -66,6 +75,8 @@ export interface BasicInfo {
   quote_date: string | null
   currency: string | null
   moq: number | null
+  /** 多档起订量；只有单一无条件的起订量时为 null */
+  moq_options: MoqOption[] | null
 }
 
 /** price_tree 明细行的 meta（按 quote_id 各存一份，均可能缺省） */

@@ -790,3 +790,95 @@ def test_moq_rule_idempotent():
     derive_offer(offer)
     assert offer == first
     assert offer["_derived"]["moq_fallback"]["value"] == 3000
+
+
+def _moq_options_offer(moq=None, moq_options=None, other_info=None) -> dict:
+    """moq_options 相关用例：LLM 输出（可带脏数据）与「其它信息」文本按需注入。"""
+    offer = _material_offer()
+    offer["basic"] = {"currency": "CNY", "moq": moq, "moq_options": moq_options}
+    offer["other_info"] = other_info
+    return offer
+
+
+def test_moq_options_kept_and_primary_backfilled():
+    """LLM 给出分档但漏了主起订量：保留分档，并用通用（不限条件）档回填 basic.moq。"""
+    offer = _moq_options_offer(
+        moq_options=[
+            {"condition": "定制皮革单色", "value": 40000, "note": "金属管需提供3%损耗"},
+            {"condition": "皮革现货单色", "value": 3000, "note": None},
+        ]
+    )
+    derive_offer(offer)
+    assert [(o["condition"], o["value"]) for o in offer["basic"]["moq_options"]] == [
+        ("定制皮革单色", 40000),
+        ("皮革现货单色", 3000),
+    ]
+    # 没有「不限条件」档时取首档（LLM 输出顺序 = 原文出现顺序）
+    assert offer["basic"]["moq"] == 40000
+    assert offer["_derived"]["moq_primary_from_options"] == {
+        "value": 40000,
+        "condition": "定制皮革单色",
+        "note": "派生值：由起订量分档取通用（不限条件）档",
+    }
+
+
+def test_moq_options_cleaned_and_degraded_to_single_moq():
+    """脏数据清理：无数值/重复项丢弃、数值字符串转整数；只剩一条且不带条件时视为普通起订量（分档置空）。"""
+    offer = _moq_options_offer(
+        moq=None,
+        moq_options=[
+            {"condition": "皮革现货单色", "value": 3000},
+            {"condition": "皮革现货单色", "value": 3000},
+            {"condition": "定制皮革单色", "value": "40000"},
+            {"condition": None, "value": 0},
+            "不是对象",
+        ],
+    )
+    derive_offer(offer)
+    assert offer["basic"]["moq_options"] == [
+        {"condition": "皮革现货单色", "value": 3000, "note": None},
+        {"condition": "定制皮革单色", "value": 40000, "note": None},
+    ]
+    assert offer["basic"]["moq"] == 3000
+
+    single = _moq_options_offer(moq_options=[{"condition": None, "value": 2000}])
+    derive_offer(single)
+    assert single["basic"]["moq_options"] is None
+    assert single["basic"]["moq"] == 2000  # 单档数值先回填主起订量再降级
+    assert single["_derived"]["moq_primary_from_options"]["value"] == 2000
+
+
+def test_moq_options_fallback_from_other_info():
+    """LLM 未给分档时，脚本从「其它信息」识别多档并留痕；顺带兜底主起订量。"""
+    offer = _moq_options_offer(
+        other_info="## 商务条款\n- 金属管需要提供3%损耗\n- 皮革现货单色 MOQ：3K\n- 定制皮革单色 MOQ：40K\n"
+    )
+    derive_offer(offer)
+    assert offer["basic"]["moq"] == 3000
+    assert [(o["condition"], o["value"]) for o in offer["basic"]["moq_options"]] == [
+        ("皮革现货单色", 3000),
+        ("定制皮革单色", 40000),
+    ]
+    assert offer["_derived"]["moq_options_fallback"]["note"] == "派生值：由「其它信息」/备注文本识别起订量"
+    assert offer["_derived"]["moq_options_fallback"]["count"] == 2
+
+
+def test_moq_options_absent_stays_null():
+    """全篇没有分档表述时保持 null；单档普通起订量也不立分档。"""
+    offer = _moq_options_offer(other_info="## 商务条款\n- 订单量少于2000PCS加收开机费1000元。\n")
+    derive_offer(offer)
+    assert offer["basic"]["moq"] == 2000
+    assert offer["basic"]["moq_options"] is None
+    assert "moq_options_fallback" not in offer["_derived"]
+
+
+def test_moq_options_rule_idempotent():
+    """双跑一致：分档与回填都不重复写。"""
+    offer = _moq_options_offer(
+        other_info="- 起订量：单色3K，双色5K\n",
+        moq_options=[{"condition": "单色", "value": 3000}, {"condition": "双色", "value": 5000}],
+    )
+    derive_offer(offer)
+    first = copy.deepcopy(offer)
+    derive_offer(offer)
+    assert offer == first

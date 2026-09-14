@@ -3,6 +3,7 @@ from app.normalize import (
     amount_occurrences,
     display_number,
     extract_moq,
+    extract_moq_options,
     normalize_amount,
     normalize_currency,
     normalize_date,
@@ -142,3 +143,50 @@ def test_extract_moq_ignores_fields_in_other_info_markdown():
         "- 运费：珠三角供方承担\n"
     )
     assert extract_moq(text) == (2000, "订单量少于2000")
+
+
+def _pairs(text):
+    return [(o["condition"], o["value"]) for o in extract_moq_options(text)]
+
+
+def test_extract_moq_options_multiple_conditions():
+    """同一产品按条件分档：每档各成一条（这是 moq_options 的立案场景）。"""
+    assert _pairs("金属管需要提供3%损耗；皮革现货单色 MOQ：3K；定制皮革单色 MOQ：40K") == [
+        ("皮革现货单色", 3000),
+        ("定制皮革单色", 40000),
+    ]
+    assert _pairs("MOQ：皮革现货单色 MOQ：3K；定制皮革单色 MOQ：40K") == [
+        ("皮革现货单色", 3000),
+        ("定制皮革单色", 40000),
+    ]
+    # 并列档位（同一「起订量：」后跟多档，只有首档带关键词）
+    assert _pairs("起订量：单色3K，双色5K") == [("单色", 3000), ("双色", 5000)]
+    assert _pairs("起订量：常规3K、加急1K、大货2K") == [
+        ("常规", 3000),
+        ("加急", 1000),
+        ("大货", 2000),
+    ]
+
+
+def test_extract_moq_options_single_and_empty():
+    """单一无条件起订量只有一条（调用方据此判定"无分档"）；无起订量文本返回空表。"""
+    assert _pairs("起订量：3,000") == [(None, 3000)]
+    assert _pairs("订单量少于2000PCS加收开机费1000元。") == [(None, 2000)]
+    assert _pairs("MOQ 5000PCS，月结60天") == [(None, 5000)]
+    assert extract_moq_options("穴数 1*1，模具寿命 30万模次") == []
+    assert extract_moq_options(None) == []
+    assert extract_moq_options("") == []
+
+
+def test_extract_moq_options_chain_guards():
+    """并列档位只在带条件的声明之后顺延，且不吞掉模具费/交期等其它条款。"""
+    assert _pairs("起订量：3K，模具费1万") == [(None, 3000)]  # 无条件声明 → 不顺延
+    assert _pairs("起订量：单色3K，交期15天。双色5K") == [("单色", 3000)]  # 句号终结 + 非档位词
+    assert _pairs("MOQ 5000PCS，月结60天，起订5000") == [(None, 5000)]  # 条件+数值相同 → 去重
+
+
+def test_extract_moq_options_dedupes_across_patterns():
+    """同一条写法可能同时命中声明式与阈值式：按「条件 + 数值」去重。"""
+    options = extract_moq_options("低于起订量2000PCS的另议")
+    assert [(o["condition"], o["value"]) for o in options] == [(None, 2000)]
+    assert options[0]["snippet"]

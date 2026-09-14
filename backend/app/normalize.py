@@ -141,6 +141,7 @@ _MOQ_QTY_WORDS = r"订单量|订货量|订购量|订单数量|订货数量"
 _MOQ_LESS_WORDS = r"少于|低于|不足|小于|未达|达不到|不够|不满"
 # 关键词与数值之间允许的描述性文字（如 "MOQ,单色5K"），但不能跨越这些词——否则后面的数字不是起订量
 _MOQ_GAP = r"(?P<gap>[^0-9]{0,6}?)"
+_MOQ_NUMBER_FULL_RE = re.compile(rf"{_MOQ_NUMBER}")
 _MOQ_BAD_GAP_RE = re.compile(
     r"另议|另计|面议|待定|除外|不含|模具|开机|治具|运费|包装|加收|加价|起价|有效期|账期|损耗|税率"
 )
@@ -176,6 +177,20 @@ def _moq_value(number: str, scale: str | None) -> int | None:
     return value
 
 
+def normalize_moq_value(value: Any) -> int | None:
+    """数值/文本 → 合法起订量整数（1 ≤ MOQ ≤ 10,000,000）；越界、非整数、非数值返回 None。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return _moq_value(str(value), None)
+    if not isinstance(value, str):
+        return None
+    match = _MOQ_NUMBER_FULL_RE.fullmatch(unicodedata.normalize("NFKC", value).strip())
+    if not match:
+        return None
+    return _moq_value(match.group("num"), match.group("scale"))
+
+
 def extract_moq(text: str | None) -> tuple[int, str] | None:
     """从文本中识别起订量（MOQ → pcs），返回 (数值, 原文片段)；识别不到返回 None。
 
@@ -195,6 +210,136 @@ def extract_moq(text: str | None) -> tuple[int, str] | None:
             if value is not None:
                 return value, match.group(0).strip()
     return None
+
+
+_MOQ_COND_SEPS = "；;、，,。：:|\n\r\t"
+_MOQ_COND_SPLIT_RE = re.compile(r"[；;、，,。：:|\n\r\t]+")
+_MOQ_COND_LABEL_RE = re.compile(
+    r"^(?:[-*•·>#|]+\s*)?(?:(?:备注|说明|其它|其他|另|注)\s*[:：]?\s*)?"
+)
+_MOQ_COND_TRIM_RE = re.compile(
+    rf"^(?:(?:{_MOQ_WORDS}|{_MOQ_QTY_WORDS}|{_MOQ_LESS_WORDS})[\s:：]*)+|[\s:：,，、]+$",
+    re.IGNORECASE,
+)
+_MOQ_COND_MAX = 24
+# 并列档位：声明式命中之后，以分隔符相连的「条件 + 带量级的数值」
+_MOQ_CHAIN_SEP_RE = re.compile(r"[\s，,、；;/／|]{1,4}")
+_MOQ_CHAIN_RE = re.compile(
+    rf"(?P<cond>[^0-9\n。]{{1,{_MOQ_COND_MAX}}}?)(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<scale>[kK千万])"
+)
+_MOQ_CHAIN_MAX = 4
+_MOQ_CHAIN_SPAN = 60  # 并列档位的最大扫描距离，避免跑到下文别的条款里
+_MOQ_CHAIN_BAD_RE = re.compile(
+    r"交期|工期|账期|月结|付款|预付|运费|税率|有效期|损耗|模具|治具|样品|重量|尺寸|穴数|寿命|元|%|％"
+)
+# 纯连接词/阈值词片段不是条件（如 gap="不高于"、prefix="低于"）
+_MOQ_COND_NOISE = set(" \t\r\n:：,，、；;是为约不足小于低达满超於于至逾高多最少个件不的或再-*•·#")
+
+
+def _moq_condition(prefix: str) -> str | None:
+    """从 MOQ 命中位置附近的文字推出适用条件（原文表述）；推不出（无条件/阈值式）返回 None。
+
+    只取最后一个分隔符（；、，：等）之后的片段，避免把前半句的商务条款当成条件；
+    片段过长或整段都是连接词、MOQ 字样时判定为推不出。
+    """
+    segment = _MOQ_COND_SPLIT_RE.split(prefix)[-1]
+    segment = _MOQ_COND_LABEL_RE.sub("", segment).strip()
+    segment = _MOQ_COND_TRIM_RE.sub("", segment).strip()
+    if not segment or len(segment) > _MOQ_COND_MAX:
+        return None
+    if all(char in _MOQ_COND_NOISE for char in segment):
+        return None
+    return segment
+
+
+def _moq_chain_options(text: str, start: int) -> list[tuple[int, dict[str, Any]]]:
+    """同一条起订量声明后跟的并列档位：`起订量：单色3K，双色5K` → 双色 5000。
+
+    只在**已带条件的声明式命中**之后顺延扫描，且并列项必须带量级缩写（K/千/万），
+    条件里出现交期/账期/模具费等字样一律不算——避免把「起订量3K，模具费1万」的模具费当成档位。
+    """
+    found: list[tuple[int, dict[str, Any]]] = []
+    pos = start
+    for _ in range(_MOQ_CHAIN_MAX):
+        # 句号/过长距离都视为档位列举结束，不再往后找
+        if pos - start > _MOQ_CHAIN_SPAN or "。" in text[start:pos]:
+            break
+        separator = _MOQ_CHAIN_SEP_RE.match(text, pos)
+        if not separator:
+            break
+        pos = separator.end()
+        match = _MOQ_CHAIN_RE.match(text, pos)
+        if not match:
+            pos += 1
+            continue
+        value = _moq_value(match.group("num"), match.group("scale"))
+        raw_condition = match.group("cond")
+        condition = _moq_condition(raw_condition)
+        if (
+            value is not None
+            and condition is not None
+            and not _MOQ_CHAIN_BAD_RE.search(raw_condition)
+        ):
+            found.append(
+                (
+                    pos,
+                    {"condition": condition, "value": value, "snippet": match.group(0).strip()},
+                )
+            )
+        pos = match.end()
+    return found
+
+
+def extract_moq_options(text: str | None) -> list[dict[str, Any]]:
+    """识别文本中**全部**起订量条目（含适用条件），返回 [{condition, value, snippet}]。
+
+    与 extract_moq 用同一套写法规则，区别是逐条收集而非只取第一条：
+    同一产品按条件分档报价时（如「皮革现货单色 MOQ：3K；定制皮革单色 MOQ：40K」、
+    「起订量：单色3K，双色5K」），每档各成一条；
+    按「条件 + 数值」去重（同一句可能同时命中声明式与阈值式规则）。
+    """
+    if not text:
+        return []
+    normalized = unicodedata.normalize("NFKC", str(text))
+    found: list[tuple[int, dict[str, Any]]] = []
+    for pattern in (_MOQ_AFTER_RE, _MOQ_LEAD_RE, _MOQ_BELOW_RE):
+        for match in pattern.finditer(normalized):
+            if _MOQ_BAD_GAP_RE.search(match.group("gap") or ""):
+                continue
+            value = _moq_value(match.group("num"), match.group("scale"))
+            if value is None:
+                continue
+            found.append(
+                (
+                    match.start(),
+                    {
+                        "condition": _moq_condition(normalized[: match.start()])
+                        or _moq_condition(match.group("gap") or ""),
+                        "value": value,
+                        "snippet": match.group(0).strip(),
+                    },
+                )
+            )
+    for match in _MOQ_AFTER_RE.finditer(normalized):
+        if _MOQ_BAD_GAP_RE.search(match.group("gap") or ""):
+            continue
+        if _moq_value(match.group("num"), match.group("scale")) is None:
+            continue
+        # 只有带条件的声明才可能跟着并列档位（无条件声明后跟的多半是别的商务条款）
+        if _moq_condition(normalized[: match.start()]) or _moq_condition(
+            match.group("gap") or ""
+        ):
+            found.extend(_moq_chain_options(normalized, match.end()))
+
+    options: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, int]] = set()
+    for _, option in sorted(found, key=lambda item: item[0]):
+        key = (option["condition"], option["value"])
+        if key in seen:
+            continue
+        seen.add(key)
+        options.append(option)
+    return options
 
 
 def normalize_rate(value: Any) -> float | None:

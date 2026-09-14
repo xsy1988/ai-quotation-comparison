@@ -1,4 +1,5 @@
-import type { CSSProperties } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, RefObject } from 'react'
 import type { Comparison, HierarchyKey, Supplier, WarningCategory } from '../types'
 import { NA_TEXT } from './Amount'
 
@@ -6,6 +7,9 @@ export type CellValue = number | null
 
 /** 供应商报价列的最小宽度：一行可容纳 10 个汉字（14px × 10）加单元格内边距 */
 export const SUPPLIER_COL_MIN_WIDTH = 160
+
+/** 表格外层容器与 antd 滚动区（.ant-table-body）的宽度差：留出这点余量，避免刚好撑满时出现 1px 横向滚动条 */
+const WIDTH_TOLERANCE = 2
 
 /** 供应商分组口径：与后端 _task_quotes 一致，优先 supplier_code，缺失时用名称 */
 function supplierKey(s: Supplier): string {
@@ -53,6 +57,52 @@ export function supplierSeparatorStyle(group?: SupplierColumnGroup): CSSProperti
   return group && group.isGroupStart && group.groupIndex > 0
     ? { borderLeft: '2px solid #bfbfbf' }
     : {}
+}
+
+export interface SupplierColumnFit {
+  /** 挂在表格外层容器上，用于量出可用宽度（ResizeObserver 跟随窗口/侧栏变化） */
+  ref: RefObject<HTMLDivElement>
+  /** 第 index 个供应商列的宽度：余量均分给各列撑满一屏，放不下时统一落到"一行 10 个汉字"的最小宽度 */
+  widthOf: (index: number) => number
+  /** 表格 scroll.x：恰好容纳固定列 + 所有供应商列；放得下时由 antd 的 min-width:100% 撑满容器 */
+  scrollX: number
+}
+
+/** 供应商列宽自适应：先按最小宽度（10 个汉字）平分容器余量，还有余量就均分加宽把整表撑满；
+ *  只有全部按最小宽度都放不下时，才让表格左右拖动。 */
+export function useSupplierColumnFit(
+  count: number,
+  labelWidth: number,
+  minWidth: number = SUPPLIER_COL_MIN_WIDTH,
+): SupplierColumnFit {
+  const ref = useRef<HTMLDivElement>(null)
+  const [containerWidth, setContainerWidth] = useState(0)
+
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!element) return undefined
+    const measure = () => setContainerWidth(element.clientWidth)
+    measure()
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [count])
+
+  return useMemo(() => {
+    const available = containerWidth - labelWidth - WIDTH_TOLERANCE
+    const width =
+      count <= 0 || available <= 0 ? minWidth : Math.max(minWidth, Math.floor(available / count))
+    // 均分后的零头（<列数 px）留给最后一列，保证放得下时各列之和正好等于容器宽
+    const slack = count > 0 && available > width * count ? available - width * count : 0
+    const total = width * count + slack
+    return {
+      ref,
+      widthOf: (index: number) => (index === count - 1 ? width + slack : width),
+      // 撑得下时略小于容器宽（antd 会给表格补 min-width:100%），多退少补都由浏览器完成，不再溢出 1px
+      scrollX: labelWidth + total,
+    }
+  }, [containerWidth, count, labelWidth, minWidth])
 }
 
 /** 从 hierarchy 取某行的 quote_id -> 值 映射 */

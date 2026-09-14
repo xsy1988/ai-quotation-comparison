@@ -53,14 +53,31 @@ const BASIC_LABELS: [string, string][] = [
   ['quote_date', '报价日期'],
   ['currency', '币种'],
   ['moq', '起订量'],
+  ['moq_options', '起订量分档'],
   ['quote_no', '报价单号'],
   ['source_file', '来源文件'],
 ]
 
+/** 起订量分档渲染成「条件 3,000（备注）」；普通字段直接字符串化 */
+function formatBasicValue(value: unknown): string {
+  if (!Array.isArray(value)) return String(value)
+  return value
+    .map((item) => {
+      const opt = item as { condition?: string | null; value?: number; note?: string | null }
+      if (typeof opt?.value !== 'number') return null
+      return `${opt.condition || '不限条件'} ${opt.value.toLocaleString()}${opt.note ? `（${opt.note}）` : ''}`
+    })
+    .filter((text): text is string => text !== null)
+    .join('；')
+}
+
 function basicEntries(basic: Record<string, unknown>) {
-  return BASIC_LABELS.filter(([key]) => basic[key] !== null && basic[key] !== undefined).map(
-    ([key, label]) => ({ label, value: String(basic[key]) }),
-  )
+  return BASIC_LABELS.filter(
+    ([key]) =>
+      basic[key] !== null &&
+      basic[key] !== undefined &&
+      !(Array.isArray(basic[key]) && basic[key].length === 0),
+  ).map(([key, label]) => ({ label, value: formatBasicValue(basic[key]) }))
 }
 
 export default function QuoteDetailPage() {

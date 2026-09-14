@@ -6,6 +6,7 @@
 import json
 import re
 import sqlite3
+from typing import Any
 
 HIERARCHY_ROWS: list[tuple[str, str, str]] = [
     ("materials", "材料费", "module"),
@@ -73,6 +74,8 @@ def _suppliers(quotes: list[sqlite3.Row]) -> list[dict]:
                 "supplier_code": row["supplier_code"],
                 "part_name": basic.get("part_name"),
                 "scheme": basic.get("scheme"),
+                "moq": basic.get("moq"),
+                "moq_options": basic.get("moq_options"),
                 "flags": json.loads(row["flags"] or "[]"),
                 "calc_check": row["calc_check"],
                 "final_unit_price_taxed": row["final_unit_price_taxed"],
@@ -285,12 +288,35 @@ def _warnings(conn: sqlite3.Connection, quotes: list[sqlite3.Row]) -> list[dict]
 
 def _basic(quotes: list[sqlite3.Row]) -> list[dict]:
     """每供应商基本信息：quote.basic_info JSON 解析，字段缺失给 None。"""
-    fields = ("project_name", "part_name", "material_spec", "quote_date", "currency", "moq")
+    fields = (
+        "project_name",
+        "part_name",
+        "material_spec",
+        "quote_date",
+        "currency",
+        "moq",
+        "moq_options",
+    )
     result = []
     for row in quotes:
         info = json.loads(row["basic_info"] or "{}") or {}
         result.append({"quote_id": row["id"], **{f: info.get(f) for f in fields}})
     return result
+
+
+def moq_option_text(options: Any) -> str | None:
+    """起订量分档的单元格文本：每档一行「条件 3,000」，不限条件的档写「不限条件」；无分档返回 None。"""
+    if not isinstance(options, list) or not options:
+        return None
+    lines: list[str] = []
+    for item in options:
+        if not isinstance(item, dict) or item.get("value") is None:
+            continue
+        condition = item.get("condition") or "不限条件"
+        note = item.get("note")
+        suffix = f"（{note}）" if note else ""
+        lines.append(f"{condition} {int(item['value']):,}{suffix}")
+    return "\n".join(lines) if lines else None
 
 
 SGA_NON_TAX_TYPES = ("损耗", "管理费", "利润", "其他")
@@ -653,6 +679,24 @@ def _price_tree(
         }
         for field, label in _BASIC_TREE_ROWS
     ]
+    # 多条件起订量（现货/定制…分档）只有真的分档时才多出一行，避免常态多一行空白
+    moq_options_cells = {
+        qid: moq_option_text(basic_by_q.get(qid, {}).get("moq_options")) for qid in quote_ids
+    }
+    if any(value is not None for value in moq_options_cells.values()):
+        index = next(
+            (i + 1 for i, (field, _) in enumerate(_BASIC_TREE_ROWS) if field == "moq"),
+            len(basic_children),
+        )
+        basic_children.insert(
+            index,
+            {
+                "key": "basic_moq_options",
+                "label": "起订量分档",
+                "kind": "text",
+                "values": moq_options_cells,
+            },
+        )
 
     sga_rows = _module_detail_rows(conn, quote_ids, "sga_tax")
     sga_tax_rows = [r for r in sga_rows if r["item_type"] == "税费"]

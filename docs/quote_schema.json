@@ -26,7 +26,20 @@
         "material_spec": { "type": ["string", "null"], "description": "材料规格（原文）" },
         "quote_date":    { "type": ["string", "null"], "format": "date" },
         "currency":      { "type": "string", "enum": ["CNY", "USD", "EUR", "JPY", "HKD", "TWD", "KRW", "OTHER"] },
-        "moq":           { "type": ["number", "null"], "description": "最小起订量（pcs）" },
+        "moq":           { "type": ["number", "null"], "description": "最小起订量（pcs）。同一产品按条件（现货/定制、颜色、型号…）给出多个起订量时，取通用（不限条件）或最先出现的一条；条件明细见 moq_options" },
+        "moq_options":   {
+          "type": ["array", "null"],
+          "description": "多条件起订量：同一产品在不同条件下起订量不同时逐条列出（如「皮革现货单色 MOQ：3K」「定制皮革单色 MOQ：40K」）；只有单一通用起订量或未披露时为 null",
+          "items": {
+            "type": "object",
+            "required": ["value"],
+            "properties": {
+              "condition": { "type": ["string", "null"], "description": "适用条件（原文表述，如“皮革现货单色”“定制皮革单色”）；通用/无条件为 null" },
+              "value":     { "type": "number", "description": "该条件下的最小起订量（pcs）" },
+              "note":      { "type": ["string", "null"], "description": "补充说明（原文，如“金属管需提供3%损耗”）" }
+            }
+          }
+        },
         "category":      { "type": ["string", "null"], "description": "品类编码，关联 category 主数据；决定加工费原子映射的候选范围" },
         "quote_no":      { "type": ["string", "null"] },
         "source_file":   { "type": ["string", "null"], "description": "来源文件归档路径" },

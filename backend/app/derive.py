@@ -56,6 +56,8 @@ from typing import Any
 from app.normalize import amount_in_text as _amount_in_text
 from app.normalize import amount_occurrences as _amount_occurrences
 from app.normalize import extract_moq
+from app.normalize import extract_moq_options
+from app.normalize import normalize_moq_value
 
 MODULES = ("materials", "processing", "inspection", "packaging_transport", "sga_tax", "other")
 """参与规则 B 模块 total 判定的费用模块（同 RULE A 的模块顺序）。"""
@@ -77,6 +79,9 @@ MATERIAL_PRICE_TOLERANCE = 0.05
 
 MOQ_FALLBACK_NOTE = "派生值：由「其它信息」/备注文本识别起订量"
 """规则 E 兜底识别起订量时写入 _derived 的说明。"""
+
+MOQ_PRIMARY_FROM_OPTIONS_NOTE = "派生值：由起订量分档取通用（不限条件）档"
+"""LLM 只给了分档、漏了主起订量时，回填 basic.moq 的说明。"""
 
 CONFLICT_FLAG = "cross_validation_conflict"
 SHARED_CELL_FLAG = "shared_cell"
@@ -523,23 +528,83 @@ def _material_price_candidate(item: dict) -> float | None:
 
 
 def _moq_fallback(offer: dict, derived: dict) -> None:
-    """规则 E：basic.moq 缺失时，从「其它信息」与条目备注/名称中兜底识别起订量。"""
+    """规则 E：basic.moq / moq_options 缺失时，从「其它信息」与条目备注/名称中兜底识别起订量。"""
     basic = offer.get("basic")
-    if not isinstance(basic, dict) or basic.get("moq") is not None:
+    if not isinstance(basic, dict):
         return
-    for text in _moq_texts(offer):
-        found = extract_moq(text)
-        if found is None:
+    if basic.get("moq") is None:
+        for text in _moq_texts(offer):
+            found = extract_moq(text)
+            if found is None:
+                continue
+            value, snippet = found
+            basic["moq"] = value
+            derived["moq_fallback"] = {
+                "value": value,
+                "snippet": snippet,
+                "text": text if len(text) <= 200 else text[:200] + "…",
+                "note": MOQ_FALLBACK_NOTE,
+            }
+            break
+    if basic.get("moq_options") is None:
+        for text in _moq_texts(offer):
+            options = extract_moq_options(text)
+            # 单条且不限条件 = 普通起订量，交给 moq 即可，不必再立分档
+            if not options or (len(options) == 1 and not options[0]["condition"]):
+                continue
+            basic["moq_options"] = [
+                {"condition": item["condition"], "value": item["value"], "note": None}
+                for item in options
+            ]
+            derived["moq_options_fallback"] = {
+                "count": len(options),
+                "snippet": "；".join(item["snippet"] for item in options),
+                "text": text if len(text) <= 200 else text[:200] + "…",
+                "note": MOQ_FALLBACK_NOTE,
+            }
+            break
+
+
+def _clean_moq_options(value: Any) -> list[dict[str, Any]]:
+    """规范化 LLM 给出的 moq_options：丢弃无有效数值的条目、按「条件+数值」去重，保留有效条目。"""
+    if not isinstance(value, list):
+        return None
+    cleaned: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, int]] = set()
+    for item in value:
+        if not isinstance(item, dict):
             continue
-        value, snippet = found
-        basic["moq"] = value
-        derived["moq_fallback"] = {
-            "value": value,
-            "snippet": snippet,
-            "text": text if len(text) <= 200 else text[:200] + "…",
-            "note": MOQ_FALLBACK_NOTE,
+        fetched = normalize_moq_value(item.get("value"))
+        if fetched is None:
+            continue
+        condition = item.get("condition")
+        condition = condition.strip() if isinstance(condition, str) and condition.strip() else None
+        note = item.get("note")
+        note = note.strip() if isinstance(note, str) and note.strip() else None
+        if (condition, fetched) in seen:
+            continue
+        seen.add((condition, fetched))
+        cleaned.append({"condition": condition, "value": fetched, "note": note})
+    return cleaned
+
+
+def _is_tiered_moq(options: list[dict[str, Any]]) -> bool:
+    """是否真的算「分档」：多档，或单档但带适用条件（单档且不限条件等同普通起订量）。"""
+    return len(options) > 1 or options[0]["condition"] is not None
+
+
+def _normalize_moq_options(basic: dict, derived: dict) -> None:
+    """清理 moq_options；moq 缺失时用通用（不限条件）档回填；不成档的降级为 None 只留 moq。"""
+    options = _clean_moq_options(basic.get("moq_options"))
+    if options and basic.get("moq") is None:
+        primary = next((item for item in options if item["condition"] is None), options[0])
+        basic["moq"] = primary["value"]
+        derived["moq_primary_from_options"] = {
+            "value": primary["value"],
+            "condition": primary["condition"],
+            "note": MOQ_PRIMARY_FROM_OPTIONS_NOTE,
         }
-        return
+    basic["moq_options"] = options if options and _is_tiered_moq(options) else None
 
 
 def _moq_texts(offer: dict) -> list[str]:
@@ -780,6 +845,8 @@ def derive_offer(offer: dict, ir=None) -> list[str]:
     _fill_material_prices(offer, derived, conflicts)
 
     # 规则 E：起订量缺失时从「其它信息」/备注文本兜底识别（不参与金额勾稽）
+    if isinstance(offer.get("basic"), dict):
+        _normalize_moq_options(offer["basic"], derived)
     _moq_fallback(offer, derived)
 
     # 未税总额：有明细的模块按去重后明细金额（不用 total 字段，避免未修正的 total 污染税额派生）

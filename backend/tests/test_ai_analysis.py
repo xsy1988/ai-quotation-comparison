@@ -442,3 +442,31 @@ def test_run_without_suppliers_raises(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         run_ai_analysis(conn, 12345, chat_fn=_fake_chat([{}]))
     conn.close()
+
+
+def test_build_input_carries_per_supplier_moq(task):
+    """起订量随供应商走（同产品各供应商档位不同），所以放在 suppliers 里而不是 base。"""
+    conn, task_id = task
+    row = conn.execute("SELECT basic_info FROM quote WHERE id = ?", (_A_QUOTE_ID,)).fetchone()
+    info = json.loads(row["basic_info"] or "{}") or {}
+    info["moq"] = 3000
+    info["moq_options"] = [
+        {"condition": "皮革现货单色", "value": 3000, "note": None},
+        {"condition": "定制皮革单色", "value": 40000, "note": "金属管需提供3%损耗"},
+    ]
+    with conn:
+        conn.execute(
+            "UPDATE quote SET basic_info = ? WHERE id = ?",
+            (json.dumps(info, ensure_ascii=False), _A_QUOTE_ID),
+        )
+
+    payload = build_input(conn, get_comparison(conn, task_id))
+    first = payload["suppliers"][0]
+    assert first["moq"] == 3000
+    assert first["moq_options"][1] == {
+        "condition": "定制皮革单色",
+        "value": 40000,
+        "note": "金属管需提供3%损耗",
+    }
+    assert payload["suppliers"][1]["moq_options"] is None
+    assert "moq" not in payload["part"]  # 供应商维度字段不再挂在零件上

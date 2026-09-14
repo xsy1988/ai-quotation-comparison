@@ -755,3 +755,63 @@ def test_task_quotes_group_same_supplier_adjacently(tmp_path, monkeypatch):
     assert list(_hierarchy_row(result, "materials")["values"]) == order
     assert {s["quote_id"] for g in result["fingerprint_groups"] for s in g["rows"]} == set(order)
     conn.close()
+
+
+def _set_moq(conn, quote_id: int, moq, moq_options) -> None:
+    """直接改 quote.basic_info：模拟已解析报价单里带多档起订量。"""
+    row = conn.execute("SELECT basic_info FROM quote WHERE id = ?", (quote_id,)).fetchone()
+    info = json.loads(row["basic_info"] or "{}") or {}
+    info["moq"] = moq
+    info["moq_options"] = moq_options
+    with conn:
+        conn.execute(
+            "UPDATE quote SET basic_info = ? WHERE id = ?",
+            (json.dumps(info, ensure_ascii=False), quote_id),
+        )
+
+
+def test_price_tree_moq_options_row_only_when_tiered(comparison):
+    """起订量分档：只有真的分档时才多出「起订量分档」行，且排在「最小起订量」之后。"""
+    conn, task_id, qa, qb, result = comparison
+    basic_node = _tree_node(result, "basic")
+    assert "basic_moq_options" not in [c["key"] for c in basic_node["children"]]
+
+    _set_moq(
+        conn,
+        qa,
+        3000,
+        [
+            {"condition": "皮革现货单色", "value": 3000, "note": None},
+            {"condition": "定制皮革单色", "value": 40000, "note": "金属管需提供3%损耗"},
+        ],
+    )
+    result = get_comparison(conn, task_id)
+    basic_node = _tree_node(result, "basic")
+    assert [c["key"] for c in basic_node["children"]][-2:] == ["basic_moq", "basic_moq_options"]
+    row = _child(basic_node, "basic_moq_options")
+    assert row["label"] == "起订量分档"
+    assert row["kind"] == "text"
+    assert row["values"][qa] == "皮革现货单色 3,000\n定制皮革单色 40,000（金属管需提供3%损耗）"
+    assert row["values"][qb] is None  # B 没有分档 → 空值语义
+    suppliers = {s["quote_id"]: s for s in result["suppliers"]}
+    assert suppliers[qa]["moq"] == 3000
+    assert suppliers[qa]["moq_options"][1]["value"] == 40000
+    assert suppliers[qb]["moq_options"] is None
+    conn.close()
+
+
+def test_moq_option_text_formatting():
+    """分档文本：每档一行；不限条件的档写「不限条件」；脏数据整条跳过；无分档返回 None。"""
+    from app.compare.compare_engine import moq_option_text
+
+    assert moq_option_text(None) is None
+    assert moq_option_text([]) is None
+    assert moq_option_text("3000") is None
+    assert moq_option_text([{"condition": None, "value": 3000, "note": None}]) == "不限条件 3,000"
+    assert moq_option_text(
+        [
+            {"condition": "现货", "value": 3000},
+            {"condition": "定制", "value": 40000, "note": "含3%损耗"},
+            {"value": None},
+        ]
+    ) == "现货 3,000\n定制 40,000（含3%损耗）"

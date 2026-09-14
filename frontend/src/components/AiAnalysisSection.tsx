@@ -5,12 +5,14 @@ import { ReloadOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { errorDetail, generateAiAnalysis, getAiAnalysis } from '../api/client'
 import type { AiAnalysisContent, AiAnalysisResponse, AiAnalysisSupplier } from '../types'
+import { useSupplierColumnFit } from './compareUtils'
 
 /** 已经自动触发过的「任务+输入指纹」，避免刷新/重挂载重复触发（指纹变化才会重新触发） */
 const AUTO_TRIGGERED = new Set<string>()
 
 const DIMENSION_LABEL = '维度'
 const DIMENSION_WIDTH = 132
+/** AI 单元格是整句话（优势/劣势/风险），最小宽度比报价对比列更宽 */
 const SUPPLIER_COL_MIN_WIDTH = 240
 
 /** 推理中的阶段文案（无真实进度通道，按耗时轮播，属于占位动画的一部分） */
@@ -268,6 +270,8 @@ export default function AiAnalysisSection({
     () => orderSuppliers(content?.suppliers ?? [], supplierOrder),
     [content, supplierOrder],
   )
+  // 列宽自适应：放得下就均分撑满一屏，放不下（每列已到最小宽度）才左右拖动
+  const fit = useSupplierColumnFit(suppliers.length, DIMENSION_WIDTH, SUPPLIER_COL_MIN_WIDTH)
 
   const columns: TableProps<RowNode>['columns'] = content
     ? [
@@ -278,7 +282,7 @@ export default function AiAnalysisSection({
           width: DIMENSION_WIDTH,
           fixed: 'left',
         },
-        ...suppliers.map((s) => ({
+        ...suppliers.map((s, index) => ({
           title: (
             <span>
               {s.name}
@@ -290,7 +294,7 @@ export default function AiAnalysisSection({
             </span>
           ),
           key: `q${s.quote_id}`,
-          minWidth: SUPPLIER_COL_MIN_WIDTH,
+          width: fit.widthOf(index),
           render: (_: unknown, row: RowNode) => row.cells[String(s.quote_id)] ?? '—',
         })),
       ]
@@ -386,22 +390,24 @@ export default function AiAnalysisSection({
       )}
 
       {!running && content && (
-        <Table<RowNode>
-          size="small"
-          rowKey="key"
-          bordered
-          pagination={false}
-          columns={columns}
-          dataSource={rows}
-          rowClassName={rowClassName}
-          // 供应商较多时允许左右拖动；「维度」列固定
-          scroll={{ x: 'max-content' }}
-          expandable={{
-            defaultExpandedRowKeys: [],
-            indentSize: 16,
-          }}
-          locale={{ emptyText: '—' }}
-        />
+        <div ref={fit.ref}>
+          <Table<RowNode>
+            size="small"
+            rowKey="key"
+            bordered
+            pagination={false}
+            columns={columns}
+            dataSource={rows}
+            rowClassName={rowClassName}
+            // 供应商较多时允许左右拖动；「维度」列固定
+            scroll={{ x: fit.scrollX }}
+            expandable={{
+              defaultExpandedRowKeys: [],
+              indentSize: 16,
+            }}
+            locale={{ emptyText: '—' }}
+          />
+        </div>
       )}
     </Card>
   )
