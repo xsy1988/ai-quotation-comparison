@@ -31,8 +31,14 @@ def _is_shared_item(note: str | None, amount) -> bool:
 
 
 def _task_quotes(conn: sqlite3.Connection, task_id: int) -> list[sqlite3.Row]:
-    # 只取已完成的报价单：pending 占位行（进度展示用）与 failed 行不进比价视图
-    return list(
+    """任务内参与比价的报价单，按「同一供应商相邻」排序。
+
+    排序键 = 供应商首次出现的序号，组内按 quote id 升序：同一供应商的多份报价（多产品/
+    多方案）在比价表里必须挨在一起，否则用户要跨列比对同一家供应商的报价（历史缺陷）。
+    供应商身份一律按 supplier_name 分组：新供应商的 supplier_code 为空，按 code 会把
+    同名供应商拆散。此顺序是全量下游顺序（含 AI 分析的供应商列顺序）的唯一来源。
+    """
+    rows = list(
         conn.execute(
             "SELECT id, supplier_name, supplier_code, flags, calc_check, final_unit_price_taxed,"
             " category_code, basic_info, other_info"
@@ -40,6 +46,20 @@ def _task_quotes(conn: sqlite3.Connection, task_id: int) -> list[sqlite3.Row]:
             (task_id,),
         )
     )
+    group_order: dict[str, int] = {}
+    for row in rows:
+        key = _supplier_key(row)
+        group_order.setdefault(key, len(group_order))
+    rows.sort(key=lambda row: (group_order[_supplier_key(row)], row["id"]))
+    return rows
+
+
+def _supplier_key(row: sqlite3.Row) -> str:
+    """供应商分组键：以展示名称为准（表格列头就是名称），名称缺失时退回 supplier_code。"""
+    name = (row["supplier_name"] or "").strip()
+    if name:
+        return f"name:{name}"
+    return f"code:{(row['supplier_code'] or '').strip()}"
 
 
 def _suppliers(quotes: list[sqlite3.Row]) -> list[dict]:

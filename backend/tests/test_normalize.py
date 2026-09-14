@@ -2,6 +2,7 @@ from app.normalize import (
     amount_in_text,
     amount_occurrences,
     display_number,
+    extract_moq,
     normalize_amount,
     normalize_currency,
     normalize_date,
@@ -100,3 +101,44 @@ def test_amount_occurrences_counts_boundary_hits():
     assert amount_occurrences("全检 0.30", 0.3) == 1
     assert amount_occurrences("0.30 0.30", 0.3) == 2  # 恰好出现一次判定的反例
     assert amount_occurrences("10.30", 0.3) == 0
+
+
+def test_extract_moq_declared_forms():
+    """声明式写法：量级缩写（K/千/万）、千分位、英文关键词、单双色分别标注取通用值。"""
+    assert extract_moq("皮革现货单色 MOQ：3K") == (3000, "MOQ:3K")
+    assert extract_moq("MOQ,单色5K") == (5000, "MOQ,单色5K")
+    assert extract_moq("最小起订量 2000PCS") == (2000, "最小起订量 2000")
+    assert extract_moq("起订量：3,000") == (3000, "起订量:3,000")
+    assert extract_moq("起订量2千个") == (2000, "起订量2千")
+    assert extract_moq("起订量：单色3K，双色5K") == (3000, "起订量:单色3K")  # 取最先出现的通用值
+    assert extract_moq("minimum order quantity 500") == (500, "minimum order quantity 500")
+    assert extract_moq("起订量不足500") == (500, "起订量不足500")
+
+
+def test_extract_moq_threshold_forms():
+    """阈值式写法（订单量下限即起订量）：豪泽 2000PCS / 美格 3000PCS。"""
+    assert extract_moq("订单量少于2000PCS加收开机费1000元。") == (2000, "订单量少于2000")
+    assert extract_moq("订单量少于3000PCS加收开机费800元。") == (3000, "订单量少于3000")
+    assert extract_moq("低于起订量2000PCS的另议") == (2000, "起订量2000")
+
+
+def test_extract_moq_ignores_non_moq_text():
+    """非起订量文本：报价数量列、穴数/寿命、无数字表述、跨越无关词的金额。"""
+    assert extract_moq("数量(PCS): 1") is None
+    assert extract_moq("穴数 1*1，模具寿命 30万模次") is None
+    assert extract_moq("无起订量要求") is None
+    assert extract_moq("MOQ另议，模具费20000元") is None
+    assert extract_moq("MOQ：0") is None
+    assert extract_moq(None) is None
+    assert extract_moq("") is None
+
+
+def test_extract_moq_ignores_fields_in_other_info_markdown():
+    """「其它信息」Markdown 整体送入：命中商务条款里的起订量，不受同段落其它数字干扰。"""
+    text = (
+        "## 商务条款\n"
+        "- 报价有效期 15 天\n"
+        "- 订单量少于2000PCS加收开机费1000元。\n"
+        "- 运费：珠三角供方承担\n"
+    )
+    assert extract_moq(text) == (2000, "订单量少于2000")

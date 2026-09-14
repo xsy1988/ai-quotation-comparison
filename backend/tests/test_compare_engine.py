@@ -720,3 +720,38 @@ def test_custom_drawer_becomes_comparison_tab(comparison):
     assert bucket["values"] == {qa: 2.0, qb: 1.8}
     # 兜底桶仍在，保证未归类金额不丢
     assert custom["groups"][-1]["group_code"] == "unmatched"
+
+
+def test_task_quotes_group_same_supplier_adjacently(tmp_path, monkeypatch):
+    """供应商分组：同一供应商的多份报价必须相邻（首次出现顺序），组内按 quote id 升序。
+
+    历史缺陷：任务内报价按 quote id 全序排列，同一供应商的两份报价被别家插开，
+    用户在「报价对比」「AI 分析」里无法相邻比对同一家的报价。
+    """
+    import app.persist as persist_module
+
+    monkeypatch.setattr(persist_module, "SNAPSHOT_DIR", tmp_path / "snapshots")
+    db_path = tmp_path / "group.db"
+    monkeypatch.setenv("QUOTES_DB_PATH", str(db_path))
+    env = {**os.environ, "QUOTES_DB_PATH": str(db_path)}
+    subprocess.run(
+        [sys.executable, "scripts/import_master_data.py"],
+        cwd=BACKEND_DIR, env=env, check=True, capture_output=True,
+    )
+    init_db()
+    conn = get_connection()
+    with conn:
+        cur = conn.execute("INSERT INTO comparison_task (project_name, status) VALUES ('分组测试', 'parsed')")
+        task_id = cur.lastrowid
+    # 上传顺序：甲、乙、甲 → 期望列顺序 甲1、甲2、乙（而不是 甲1、乙、甲2）
+    a1 = persist_quote(make_quote("甲供应商", True, True), task_id=task_id, file_hash="g1")
+    b1 = persist_quote(make_quote("乙供应商", False, False), task_id=task_id, file_hash="g2")
+    a2 = persist_quote(make_quote("甲供应商", False, True), task_id=task_id, file_hash="g3")
+
+    result = get_comparison(conn, task_id)
+    order = [s["quote_id"] for s in result["suppliers"]]
+    assert order == [a1["quote_id"], a2["quote_id"], b1["quote_id"]]
+    # 层级/指纹/模治具等下游模块共用同一顺序（列对齐的前提）
+    assert list(_hierarchy_row(result, "materials")["values"]) == order
+    assert {s["quote_id"] for g in result["fingerprint_groups"] for s in g["rows"]} == set(order)
+    conn.close()

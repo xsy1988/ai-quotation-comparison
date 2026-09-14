@@ -129,6 +129,74 @@ def amount_in_text(text: str | None, amount: float) -> bool:
     return amount_occurrences(text, amount) > 0
 
 
+_MOQ_GAP_CHARS = "\\s:：,，、是为约不足小于低达满超於于至逾"  # 关键词与数值之间的连接词
+_MOQ_SCALE = {"k": 1000, "K": 1000, "千": 1000, "万": 10000}
+
+_MOQ_NUMBER = r"(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<scale>k|K|千|万)?"
+_MOQ_WORDS = (
+    r"最小起订量|最低起订量|最小订量|最少订量|最小订单量|最低订购量|最小订货量"
+    r"|起订量|起订数|起订|MOQ|minimum\s+order\s+quantity|min\.?\s*order\s*(?:qty|quantity)?"
+)
+_MOQ_QTY_WORDS = r"订单量|订货量|订购量|订单数量|订货数量"
+_MOQ_LESS_WORDS = r"少于|低于|不足|小于|未达|达不到|不够|不满"
+# 关键词与数值之间允许的描述性文字（如 "MOQ,单色5K"），但不能跨越这些词——否则后面的数字不是起订量
+_MOQ_GAP = r"(?P<gap>[^0-9]{0,6}?)"
+_MOQ_BAD_GAP_RE = re.compile(
+    r"另议|另计|面议|待定|除外|不含|模具|开机|治具|运费|包装|加收|加价|起价|有效期|账期|损耗|税率"
+)
+
+# 正向写法：MOQ：3K / 起订量 2000 / 起订量不足500 / MOQ不低于2000PCS（长关键词在前，短词兜后）
+_MOQ_AFTER_RE = re.compile(rf"(?:{_MOQ_WORDS}){_MOQ_GAP}{_MOQ_NUMBER}", re.IGNORECASE)
+# 反向写法（阈值即起订量）：订单量少于2000PCS加收开机费
+_MOQ_BELOW_RE = re.compile(
+    rf"(?:{_MOQ_QTY_WORDS})[^0-9]{{0,6}}?(?:{_MOQ_LESS_WORDS}){_MOQ_GAP}{_MOQ_NUMBER}",
+    re.IGNORECASE,
+)
+# 数值先行：低于起订量2000PCS 的另行报价
+_MOQ_LEAD_RE = re.compile(
+    rf"(?:{_MOQ_LESS_WORDS}){_MOQ_GAP}{_MOQ_NUMBER}[^0-9]{{0,6}}?(?:{_MOQ_WORDS})",
+    re.IGNORECASE,
+)
+
+MOQ_MIN = 1
+MOQ_MAX = 10_000_000
+
+
+def _moq_value(number: str, scale: str | None) -> int | None:
+    """数值 + 量级缩写（K/k/千=1000、万=10000）→ 整数起订量；越界/非整数返回 None。"""
+    try:
+        amount = float(number.replace(",", "").replace("，", ""))
+    except ValueError:
+        return None
+    if scale:
+        amount *= _MOQ_SCALE[scale]
+    value = int(round(amount))
+    if abs(amount - value) > 1e-6 or not (MOQ_MIN <= value <= MOQ_MAX):
+        return None
+    return value
+
+
+def extract_moq(text: str | None) -> tuple[int, str] | None:
+    """从文本中识别起订量（MOQ → pcs），返回 (数值, 原文片段)；识别不到返回 None。
+
+    覆盖两类写法：
+    1. 声明式——`MOQ：3K`、`MOQ,单色5K`、`最小起订量 2000PCS`、`起订量不足500`；
+    2. 阈值式——`订单量少于2000PCS加收开机费1000元`、`低于起订量2000PCS的另议`。
+    声明式优先（其中取最先出现的一条，即不限颜色/型号的通用起订量），其后才是阈值式。
+    """
+    if not text:
+        return None
+    normalized = unicodedata.normalize("NFKC", str(text))
+    for pattern in (_MOQ_AFTER_RE, _MOQ_LEAD_RE, _MOQ_BELOW_RE):
+        for match in pattern.finditer(normalized):
+            if _MOQ_BAD_GAP_RE.search(match.group("gap") or ""):
+                continue
+            value = _moq_value(match.group("num"), match.group("scale"))
+            if value is not None:
+                return value, match.group(0).strip()
+    return None
+
+
 def normalize_rate(value: Any) -> float | None:
     """费率文本 → 小数（"13%"→0.13，"0.13"→0.13）；无法解析返回 None。"""
     if value is None:

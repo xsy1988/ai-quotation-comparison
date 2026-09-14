@@ -30,6 +30,13 @@ D. 材料栏只印要素不印材料费时的兜底（勾稽背书，执行于 A
    calc_abnormal）。背书不通过或材料栏无料价 → 保持 null；有候选但背书不通过时写
    material_price_uncorroborated 冲突说明拒绝原因。料价可能只是元/kg 单价（如
    "材料单价 35"），故一律要求背书，绝不出现 料重×料价 这类乘积。
+E. 起订量（MOQ）兜底识别：basic.moq 为 null（LLM 未给出）时，扫描 other_info
+   （「其它信息」Markdown）与各费用条目/模治具条目的 note、name 文本，按关键词锚点规则
+   识别起订量——声明式（MOQ：3K、起订量 2000、起订量不足500）与阈值式
+   （订单量少于2000PCS加收开机费）两类写法，K/千=1000、万=10000。命中即写 basic.moq，
+   并在 _derived.moq_fallback 归档出处片段与命中文本；识别不到保持 null（不猜测）。
+   LLM 已给出的值优先，本规则只兜底不覆盖；规则不读 ir，因此 persist 的"无 IR 重放"
+   路径同样生效（幂等：第二次调用 basic.moq 非空即返回）。
 
 随后 summary 全量重算：untaxed_total = 未税总额（一律按去重后明细金额：
 materials/processing/inspection/packaging_transport/other 条目 + sga_tax 非税费条目，
@@ -44,9 +51,11 @@ LLM 原 summary 存档 offer["_derived"]["summary_llm_original"]。
 
 import copy
 import re
+from typing import Any
 
 from app.normalize import amount_in_text as _amount_in_text
 from app.normalize import amount_occurrences as _amount_occurrences
+from app.normalize import extract_moq
 
 MODULES = ("materials", "processing", "inspection", "packaging_transport", "sga_tax", "other")
 """参与规则 B 模块 total 判定的费用模块（同 RULE A 的模块顺序）。"""
@@ -65,6 +74,9 @@ MATERIAL_PRICE_NOTE = "派生值：料价照抄为每件材料费（勾稽背书
 """规则 D 兜底填材料费时写入 item note 的标注。"""
 MATERIAL_PRICE_TOLERANCE = 0.05
 """规则 D 勾稽背书允差（元/pcs，与单据未税↔含税的 0.05 元勾稽口径一致）。"""
+
+MOQ_FALLBACK_NOTE = "派生值：由「其它信息」/备注文本识别起订量"
+"""规则 E 兜底识别起订量时写入 _derived 的说明。"""
 
 CONFLICT_FLAG = "cross_validation_conflict"
 SHARED_CELL_FLAG = "shared_cell"
@@ -510,6 +522,55 @@ def _material_price_candidate(item: dict) -> float | None:
     return None
 
 
+def _moq_fallback(offer: dict, derived: dict) -> None:
+    """规则 E：basic.moq 缺失时，从「其它信息」与条目备注/名称中兜底识别起订量。"""
+    basic = offer.get("basic")
+    if not isinstance(basic, dict) or basic.get("moq") is not None:
+        return
+    for text in _moq_texts(offer):
+        found = extract_moq(text)
+        if found is None:
+            continue
+        value, snippet = found
+        basic["moq"] = value
+        derived["moq_fallback"] = {
+            "value": value,
+            "snippet": snippet,
+            "text": text if len(text) <= 200 else text[:200] + "…",
+            "note": MOQ_FALLBACK_NOTE,
+        }
+        return
+
+
+def _moq_texts(offer: dict) -> list[str]:
+    """规则 E 的检索文本：其它信息在前（商务条款通常写在这里），其后是条目备注/名称。"""
+    texts: list[str] = []
+    other_info = offer.get("other_info")
+    if isinstance(other_info, str) and other_info.strip():
+        texts.append(other_info)
+    tooling = offer.get("tooling") or {}
+    for section in ("molds", "fixtures", "stencils"):
+        texts.extend(_item_texts((tooling.get(section) or {}).get("items")))
+    up = offer.get("unit_price") or {}
+    for name in MODULES:
+        texts.extend(_item_texts((up.get(name) or {}).get("items")))
+    return texts
+
+
+def _item_texts(items: Any) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    texts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for field in ("note", "name"):
+            value = item.get(field)
+            if isinstance(value, str) and value.strip():
+                texts.append(value)
+    return texts
+
+
 def _fill_material_prices(offer: dict, derived: dict, conflicts: list[dict]) -> None:
     """规则 D：材料栏只印要素不印材料费时，勾稽背书通过则把料价照抄为材料费。"""
     up = offer["unit_price"]
@@ -704,7 +765,7 @@ def _resolve_tax(offer: dict, derived: dict, conflicts: list[dict], untaxed: flo
 def derive_offer(offer: dict, ir=None) -> list[str]:
     """对单个 offer 应用派生重算规则。
 
-    顺序：A 去重 → D 料价兜底（勾稽背书）→ 未税 → C 税费 → B 模块 total → summary 重算。
+    顺序：A 去重 → D 料价兜底（勾稽背书）→ E 起订量兜底 → 未税 → C 税费 → B 模块 total → summary 重算。
     ir 可选（IR 对象或 dict）：提供时用于规则 B/C 的"单据出处"判定；不传则保守降级。
     就地修正并返回 flags 增量（shared_cell / cross_validation_conflict / calc_abnormal）。
     """
@@ -717,6 +778,9 @@ def derive_offer(offer: dict, ir=None) -> list[str]:
 
     # 规则 D：材料栏只印料价（未印材料费）时按勾稽背书兜底填材料费（在未税/税费计算之前）
     _fill_material_prices(offer, derived, conflicts)
+
+    # 规则 E：起订量缺失时从「其它信息」/备注文本兜底识别（不参与金额勾稽）
+    _moq_fallback(offer, derived)
 
     # 未税总额：有明细的模块按去重后明细金额（不用 total 字段，避免未修正的 total 污染税额派生）
     untaxed = untaxed_total_of(up)

@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, Dropdown, Table, Tag, Tooltip } from 'antd'
+import { Button, Dropdown, Table, Tag, Tooltip, Typography } from 'antd'
 import { DownOutlined } from '@ant-design/icons'
 import type { TableProps } from 'antd'
 import type { Comparison, PriceTreeNode, ProcessingItem, Supplier } from '../types'
 import Amount, { NA_TEXT } from './Amount'
 import ProcessingItemCell from './ProcessingItemCell'
+import {
+  SUPPLIER_COL_MIN_WIDTH,
+  supplierColumnGroups,
+  supplierSeparatorStyle,
+} from './compareUtils'
 
 const NA_DETAIL_TEXT = '/'
 
@@ -114,6 +119,9 @@ interface Props {
 export default function HierarchyTable({ comparison, highlighted }: Props) {
   const { suppliers, price_tree } = comparison
   const [procScope, setProcScope] = useState<ProcScope>('domain')
+
+  // 供应商列分组（同一供应商的报价列由后端排在相邻位置）：组间画分隔线 + 列最小宽度
+  const groups = useMemo(() => supplierColumnGroups(suppliers), [suppliers])
 
   const tree = useMemo(() => {
     // 加工费节点嵌套在 unit_price 下，需递归变换
@@ -261,11 +269,18 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
       ),
       key: `q${s.quote_id}`,
       align: 'right' as const,
-      // 产品单价行最低价单元格：浅绿底标识（内联样式，压过层级底色）
-      onCell: (node: PriceTreeNode) =>
-        node.key === 'unit_price' && lowestFinalQids.has(String(s.quote_id))
-          ? { style: { background: '#f0fff4' } }
-          : {},
+      // 列最小宽度：宽度不够时表体左右拖动；tableLayout=auto 由 rc-table 落到 <col min-width>
+      minWidth: SUPPLIER_COL_MIN_WIDTH,
+      onHeaderCell: () => ({ style: supplierSeparatorStyle(groups.get(s.quote_id)) }),
+      // 产品单价行最低价单元格：浅绿底标识（内联样式，压过层级底色）；组首列加分隔线
+      onCell: (node: PriceTreeNode) => ({
+        style: {
+          ...supplierSeparatorStyle(groups.get(s.quote_id)),
+          ...(node.key === 'unit_price' && lowestFinalQids.has(String(s.quote_id))
+            ? { background: '#f0fff4' }
+            : {}),
+        },
+      }),
       render: (_: unknown, node: PriceTreeNode) => {
         const raw = node.values[String(s.quote_id)]
         const meta = node.meta?.[String(s.quote_id)]
@@ -340,20 +355,30 @@ export default function HierarchyTable({ comparison, highlighted }: Props) {
   ]
 
   return (
-    <Table<PriceTreeNode>
-      size="middle"
-      rowKey="key"
-      columns={columns}
-      dataSource={tree}
-      pagination={false}
-      bordered
-      sticky
-      rowClassName={rowClassName}
-      expandable={{
-        expandedRowKeys: expandedKeys,
-        onExpandedRowsChange: (keys) => setExpandedKeys(keys as string[]),
-      }}
-      locale={{ emptyText: NA_TEXT }}
-    />
+    <>
+      <Table<PriceTreeNode>
+        size="middle"
+        rowKey="key"
+        columns={columns}
+        dataSource={tree}
+        pagination={false}
+        bordered
+        sticky
+        rowClassName={rowClassName}
+        // 供应商多时左右拖动；项目列固定，供应商列最小宽度由 minWidth 保证
+        scroll={{ x: 'max-content' }}
+        expandable={{
+          expandedRowKeys: expandedKeys,
+          onExpandedRowsChange: (keys) => setExpandedKeys(keys as string[]),
+        }}
+        locale={{ emptyText: NA_TEXT }}
+      />
+      <Typography.Text
+        type="secondary"
+        style={{ fontSize: 12, display: 'block', marginTop: 8 }}
+      >
+        同一供应商的多份报价列已相邻排列（灰色竖线分组）· 列较多时可左右拖动查看
+      </Typography.Text>
+    </>
   )
 }

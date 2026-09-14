@@ -1,4 +1,4 @@
-<!-- version: v2.5.0 -->
+<!-- version: v2.6.0 -->
 
 把报价单解析为 JSON：顶层为 {"offers": [...]}，每个 offer 是一份完整报价，严格符合 quote_schema v1.1（压缩版字段说明）。offers 按"产品 × 报价方案"拆分：
 1. 同一产品出现多行不同工艺路线/价格（多个报价方案）时，每行一个 offer，basic.scheme 填方案标识（取自原表方案列/品名/备注或工艺路线简述，如"方案1"）；
@@ -26,7 +26,7 @@
 - basic*: {project_name: 字符串|null, part_name: 字符串|null（单据印出部品名称/零件名时照抄；确实未印出填 null，禁止据报价内容自行编造）, scheme: 字符串|null（多方案时填方案标识，单方案填 null）,
   material_spec: 字符串|null,
   quote_date: "YYYY-MM-DD"|null, currency*: 枚举(CNY/USD/EUR/JPY/HKD/TWD/KRW/OTHER，判断不了填CNY),
-  moq: 数字|null, category: 品类编码|null（见下方品类清单）, quote_no: 字符串|null,
+  moq: 数字|null（起订量，判定规则见下方「起订量 moq」一节）, category: 品类编码|null（见下方品类清单）, quote_no: 字符串|null,
   source_file: 字符串|null, parse_status: "parsed"}
 - unit_price*: {materials*, processing*, inspection*, packaging_transport*, sga_tax*, other*, summary*}
 - tooling: 对象|null（无模治具费用时填 null）
@@ -36,6 +36,17 @@
 六费用模块结构均为 {total: 数字|null, items: [...]}。供应商只报模块总价时 total 填数、items 为空数组。
 items 里的 amount_per_pc（tooling 为 amount）允许为 null：只有单据确实没印出该金额时才填 null
 （见上方"金额一律照抄"第 2、3 条），能照抄到数字时一律照抄真实数字，不要为了省事填 null。
+
+起订量 moq（必查项，漏抽与乱填都要避免）：
+1. 起订量是"下单量下限"。常见写法都要识别：「MOQ：3K」「MOQ,单色5K」「最小起订量 2000PCS」
+   「起订量 500 个」「起订量不足500」，以及只给阈值的反向表述「订单量少于2000PCS加收开机费1000元」
+   「低于起订量2000PCS的另议」——这两句里的 2000PCS 就是起订量。
+2. 量级缩写照常换算：K/k、千 = ×1000，万 = ×10000（3K→3000、40K→40000），单位一律 pcs。
+3. 同一份单据出现多个按颜色/型号/条件的起订量（如"现货单色 MOQ：3K""定制单色 MOQ：40K"）而没有
+   拆成多个 offer 时，moq 取**最先出现的通用条目**（通常是不限条件的那条），其余条件写进 other_info。
+4. 下列内容不是起订量，严禁填进 moq：报价表的"数量(PCS)""订单数量"列的值（那是报价基准数量）；
+   模具穴数、模具寿命模次；用料量/料重；包装箱数；"加收开机费1000元"里的 1000（那是加收金额）。
+5. 单据确实没有起订量表述时填 null，并把 basic.moq 列入 _self_check.null_fields；不得拿别的数字凑数。
 
 各模块 items 字段（required 标*）：
 - materials: {name*, amount_per_pc*, spec: 字符串|null, note: 字符串|null, evidence}

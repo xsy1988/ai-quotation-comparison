@@ -731,3 +731,62 @@ def test_material_price_rule_idempotent():
     derive_offer(reject)
     assert reject == snapshot
     assert len([c for c in reject["_derived"]["conflicts"] if c["kind"] == "material_price_uncorroborated"]) == 1
+
+
+def _moq_offer(moq=None, other_info=None, notes=None, tooling_note=None) -> dict:
+    """规则 E 用最小 offer：basic.moq 可空，其它信息/条目备注按需注入。"""
+    offer = _material_offer()
+    offer["basic"] = {"currency": "CNY", "moq": moq}
+    offer["other_info"] = other_info
+    if notes:
+        for item, note in zip(offer["unit_price"]["processing"]["items"], notes):
+            item["note"] = note
+    if tooling_note:
+        offer["tooling"] = {"total": None, "molds": {"total": None, "items": [
+            {"name": "模具", "amount": 43000, "note": tooling_note}]}}
+    return offer
+
+
+def test_moq_fallback_from_other_info_threshold_clause():
+    """豪泽/美格式写法：LLM 漏抽起订量，脚本从「其它信息」商务条款兜底识别并留痕。"""
+    offer = _moq_offer(other_info="## 商务条款\n- 订单量少于2000PCS加收开机费1000元。\n")
+    derive_offer(offer)
+    assert offer["basic"]["moq"] == 2000
+    fallback = offer["_derived"]["moq_fallback"]
+    assert (fallback["value"], fallback["snippet"]) == (2000, "订单量少于2000")
+    assert fallback["note"] == "派生值：由「其它信息」/备注文本识别起订量"
+    assert offer["_derived"]["conflicts"] == []
+
+
+def test_moq_fallback_from_item_note_and_tooling_note():
+    """其它信息缺失时看条目备注；其它信息无起订量时看模治具备注。"""
+    from_note = _moq_offer(notes=["MOQ：3K", None, None, None, None, None])
+    derive_offer(from_note)
+    assert from_note["basic"]["moq"] == 3000
+
+    from_tooling = _moq_offer(other_info="## 交期\n- 量产 25 天\n", tooling_note="模具全预付；MOQ 5K")
+    derive_offer(from_tooling)
+    assert from_tooling["basic"]["moq"] == 5000
+
+
+def test_moq_llm_value_wins_and_absent_stays_null():
+    """LLM 已给出起订量时不覆盖；全篇没有起订量表述（弗我式）保持 null，不猜测。"""
+    declared = _moq_offer(moq=5000, other_info="- 订单量少于2000PCS加收开机费1000元。\n")
+    derive_offer(declared)
+    assert declared["basic"]["moq"] == 5000
+    assert "moq_fallback" not in declared["_derived"]
+
+    absent = _moq_offer(other_info="## 商务条款\n- 报价有效期 15 天\n- 数量(PCS)：1\n")
+    derive_offer(absent)
+    assert absent["basic"]["moq"] is None
+    assert "moq_fallback" not in absent["_derived"]
+
+
+def test_moq_rule_idempotent():
+    """双跑（persist 无 IR 重放）结果一致：归档只写一次。"""
+    offer = _moq_offer(other_info="- 订单量少于3000PCS加收开机费800元。\n")
+    derive_offer(offer)
+    first = copy.deepcopy(offer)
+    derive_offer(offer)
+    assert offer == first
+    assert offer["_derived"]["moq_fallback"]["value"] == 3000

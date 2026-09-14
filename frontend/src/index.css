@@ -79,3 +79,8 @@ body {
 .summary-row:hover > td {
   background: #eceff3 !important;
 }
+
+/* 指纹对齐表：进入下一个供应商分组的数据行顶部画分隔线（与报价对比的列分组一致） */
+.supplier-group-start-row > td {
+  border-top: 2px solid #bfbfbf;
+}

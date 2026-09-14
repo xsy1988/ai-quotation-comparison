@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { Table, Tag } from 'antd'
 import type { Comparison } from '../types'
 import Amount from './Amount'
@@ -9,6 +10,12 @@ interface Props {
 export default function FingerprintTable({ comparison }: Props) {
   const { fingerprint_groups, suppliers } = comparison
 
+  // 行顺序与「报价对比」的供应商列顺序对齐：同一供应商的行必须相邻（suppliers 已按此排序）
+  const rank = useMemo(
+    () => new Map(suppliers.map((s, i) => [s.quote_id, i])),
+    [suppliers],
+  )
+
   const byQuoteName = new Map(
     suppliers.map((s) => [
       s.quote_id,
@@ -19,8 +26,13 @@ export default function FingerprintTable({ comparison }: Props) {
   return (
     <>
       {fingerprint_groups.map((group) => {
+        const rows = [...group.rows].sort(
+          (a, b) =>
+            (rank.get(a.quote_id) ?? Number.MAX_SAFE_INTEGER) -
+            (rank.get(b.quote_id) ?? Number.MAX_SAFE_INTEGER),
+        )
         const bySupplier = new Map<number, typeof group.rows>()
-        for (const row of group.rows) {
+        for (const row of rows) {
           const list = bySupplier.get(row.quote_id) ?? []
           list.push(row)
           bySupplier.set(row.quote_id, list)
@@ -41,13 +53,18 @@ export default function FingerprintTable({ comparison }: Props) {
                 </span>
               </span>
             )}
-            dataSource={group.rows}
+            dataSource={rows}
+            rowClassName={(row, index) =>
+              index > 0 && rows[index - 1].quote_id !== row.quote_id
+                ? 'supplier-group-start-row'
+                : ''
+            }
             columns={[
               {
                 title: '供应商',
                 dataIndex: 'quote_id',
                 key: 'supplier',
-                width: 160,
+                width: 200,
                 render: (quoteId: number) => byQuoteName.get(quoteId) ?? quoteId,
               },
               {
