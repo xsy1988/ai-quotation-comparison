@@ -53,7 +53,7 @@
                 "required": ["name", "amount_per_pc"],
                 "properties": {
                   "name":          { "type": "string" },
-                  "amount_per_pc": { "type": ["number", "null"], "description": "元/pcs；单据未印出该项金额（例如只给了料重×料价等要素）时为 null，并把要素原文写入 note，禁止自行相乘相加" },
+                  "amount_per_pc": { "type": ["number", "null"], "description": "元/pcs；单据未印出该项金额（例如只给了料重×料价等要素）时为 null，并把要素原文写入 note，禁止自行相乘相加。仅当材料栏只印「料价」、且 derive 规则 D 的勾稽背书通过（计入后含税 vs 单据含税单价差≤0.05 元/pcs）时，才由 derive 把料价照抄到此字段（只照抄，不做乘除），并在 note 追加「派生值：料价照抄为每件材料费（勾稽背书通过）」" },
                   "spec":          { "type": ["string", "null"], "description": "材质/规格（原文）" },
                   "note":          { "type": ["string", "null"], "description": "说明，自由文本（重量×单价−水口回收等计算过程原样保留）" },
                   "evidence":      { "$ref": "#/definitions/evidence" }

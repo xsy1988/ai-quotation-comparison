@@ -507,3 +507,227 @@ def test_module_total_partial_null_items_filled_with_lower_bound():
     derive_offer(offer)
     assert offer["unit_price"]["processing"]["total"] == 1.5
     assert "processing" in offer["_derived"]["filled_module_totals"]
+
+
+# ---------------------------------------------------------------------------
+# 规则 D：材料栏只印「料价」时的材料费兜底（勾稽背书）
+#
+# 真实缺陷（博业模具，quote 1）：报价单材料栏只有「料重 28 / 料价 0.96」两列，
+# 无材料费金额列。prompt 契约要求「金额一律照抄，不印金额填 null」，LLM 照办 →
+# 材料费 null → 未税少 0.96 → 含税 18.645 vs 单据 18.6 超出 0.05（实际 15.54+
+# 0.96=16.5，Δ 0.045 未超），但模块 total=null 触发 amount_missing → calc_abnormal
+# + cross_validation_conflict。规则 D 在有勾稽背书时把料价照抄为每件材料费。
+# ---------------------------------------------------------------------------
+
+def _material_offer(materials=None, sga_items=None, final=18.6) -> dict:
+    """复刻博业报价单结构：加工 4.0+3.5+1.9+1.8+1.5+0.2=12.9，检验 0.35，
+    包装运输 0.2，损耗/管理/毛利 1.2+0.1+0.79=2.09，税点 13% 金额未印出。"""
+    return {
+        "unit_price": {
+            "materials": {
+                "total": None,
+                "items": materials
+                if materials is not None
+                else [{
+                    "name": "铝合金",
+                    "amount_per_pc": None,
+                    "note": "料重 28；料价 0.96",
+                    "evidence": {"location": "page_1!R3C9:R3C10", "raw_text": "28 / 0.96"},
+                }],
+            },
+            "processing": {
+                "total": None,
+                "items": [
+                    {"name": "啤工", "amount_per_pc": 4.0},
+                    {"name": "CNC", "amount_per_pc": 3.5},
+                    {"name": "抛光", "amount_per_pc": 1.9},
+                    {"name": "氧化", "amount_per_pc": 1.8},
+                    {"name": "喷砂", "amount_per_pc": 1.5},
+                    {"name": "镭雕", "amount_per_pc": 0.2},
+                ],
+            },
+            "inspection": {"total": None, "items": [{"name": "全检", "amount_per_pc": 0.35}]},
+            "packaging_transport": {"total": None, "items": [{"name": "包装", "amount_per_pc": 0.2}]},
+            "sga_tax": {
+                "total": None,
+                "items": sga_items
+                if sga_items is not None
+                else [
+                    {"name": "损耗", "item_type": "损耗", "amount_per_pc": 1.2},
+                    {"name": "管理", "item_type": "管理费", "amount_per_pc": 0.1},
+                    {"name": "毛利", "item_type": "利润", "amount_per_pc": 0.79},
+                    {"name": "税点13%", "item_type": "税费", "amount_per_pc": None, "rate": 0.13,
+                     "evidence": {"location": "page_1!R3C28", "raw_text": "2.14"}},
+                ],
+            },
+            "other": {"total": None, "items": []},
+            "summary": {"final_unit_price_taxed": final},
+        }
+    }
+
+
+def test_material_price_corroborated_fills_material_fee():
+    """料价 0.96 计入后含税 16.5×1.13=18.645，与单据 18.6 差 0.045 ≤ 0.05 → 采纳为材料费。"""
+    offer = _material_offer()
+    derive_offer(offer)
+    item = offer["unit_price"]["materials"]["items"][0]
+    assert item["amount_per_pc"] == 0.96
+    assert item["note"].startswith("料重 28；料价 0.96；")
+    assert "派生值：料价照抄为每件材料费（勾稽背书通过）" in item["note"]
+    # 模块 total 由规则 B 回填，未税/税费/summary 随之修正；final 保留单据值
+    assert offer["unit_price"]["materials"]["total"] == 0.96
+    summary = offer["unit_price"]["summary"]
+    assert (summary["untaxed_total"], summary["tax_amount"], summary["taxed_total"]) == (16.5, 2.145, 18.645)
+    assert summary["final_unit_price_taxed"] == 18.6
+    # 金额已补齐：不再有 amount_missing / 无背书冲突，也不算勾稽异常
+    assert offer["_derived"]["modules_with_missing_amounts"] == {}
+    assert offer["_derived"]["conflicts"] == []
+    assert "calc_abnormal" not in collect_flags(offer, "pass")
+    assert "cross_validation_conflict" not in collect_flags(offer, "pass")
+    # 归档留痕（可追溯 LLM 原值 vs 派生值）
+    fallback = offer["_derived"]["material_price_fallback"]
+    assert len(fallback) == 1
+    assert (fallback[0]["value"], fallback[0]["items"]) == (0.96, 1)
+    assert (fallback[0]["document_final_unit_price_taxed"], fallback[0]["derived_taxed_total"]) == (18.6, 18.645)
+    assert offer["_derived"]["summary_llm_original"]["final_unit_price_taxed"] == 18.6
+
+
+def test_material_price_uncorroborated_keeps_null():
+    """勾稽不背书（含税单价对不上）→ 不填，保持 null 并记无背书冲突，仍打 calc_abnormal。"""
+    offer = _material_offer(final=18.7)  # Δ = 18.645 - 18.7 = -0.055 > 0.05
+    derive_offer(offer)
+    item = offer["unit_price"]["materials"]["items"][0]
+    assert item["amount_per_pc"] is None
+    assert item["note"] == "料重 28；料价 0.96"
+    assert offer["unit_price"]["materials"]["total"] is None
+    uncorroborated = [c for c in offer["_derived"]["conflicts"] if c["kind"] == "material_price_uncorroborated"]
+    assert len(uncorroborated) == 1
+    assert uncorroborated[0]["document_value"] == 0.96
+    assert uncorroborated[0]["derived_value"] is None
+    assert "勾稽不通过" in uncorroborated[0]["detail"]
+    assert offer["_derived"]["modules_with_missing_amounts"] == {"materials": 1}
+    assert "calc_abnormal" in collect_flags(offer, "fail")
+
+
+def test_material_price_missing_anchor_keeps_null():
+    """缺单据含税单价（无法勾稽）→ 不填，冲突说明缺背书依据。"""
+    offer = _material_offer(final=None)
+    derive_offer(offer)
+    assert offer["unit_price"]["materials"]["items"][0]["amount_per_pc"] is None
+    conflict = [c for c in offer["_derived"]["conflicts"] if c["kind"] == "material_price_uncorroborated"]
+    assert len(conflict) == 1
+    assert "无法勾稽背书" in conflict[0]["detail"]
+
+
+def test_material_price_without_tax_item_keeps_null():
+    """无税费条目（无法估算税额）→ 不填，同样记无背书冲突。"""
+    offer = _material_offer(
+        sga_items=[{"name": "损耗", "item_type": "损耗", "amount_per_pc": 1.2}],
+    )
+    derive_offer(offer)
+    assert offer["unit_price"]["materials"]["items"][0]["amount_per_pc"] is None
+    conflict = [c for c in offer["_derived"]["conflicts"] if c["kind"] == "material_price_uncorroborated"]
+    assert len(conflict) == 1
+    assert "无法勾稽背书" in conflict[0]["detail"]
+
+
+def test_material_price_tolerance_boundary():
+    """允差取闭区间：Δ 恰为 0.05 采纳，超出 0.05 不采纳。"""
+    at_boundary = _material_offer(final=18.595)
+    derive_offer(at_boundary)
+    assert at_boundary["unit_price"]["materials"]["items"][0]["amount_per_pc"] == 0.96
+
+    beyond = _material_offer(final=18.59)
+    derive_offer(beyond)
+    assert beyond["unit_price"]["materials"]["items"][0]["amount_per_pc"] is None
+
+
+def test_material_price_candidate_falls_back_to_two_number_evidence():
+    """note 只印料重（无「料价」关键词）时，退一步用 evidence 的两个数字取非料重项。"""
+    offer = _material_offer(
+        materials=[{
+            "name": "铝合金",
+            "amount_per_pc": None,
+            "note": "料重 28",
+            "evidence": {"location": "page_1!R3C9:R3C10", "raw_text": "28 / 0.96"},
+        }]
+    )
+    derive_offer(offer)
+    assert offer["unit_price"]["materials"]["items"][0]["amount_per_pc"] == 0.96
+
+
+def test_material_price_single_number_evidence_no_candidate():
+    """evidence 只有一个数（就是料重）→ 不猜，保持 null 且不新增无背书冲突。"""
+    offer = _material_offer(
+        materials=[{
+            "name": "铝合金",
+            "amount_per_pc": None,
+            "note": "料重 28",
+            "evidence": {"location": "page_1!R3C9", "raw_text": "28"},
+        }]
+    )
+    derive_offer(offer)
+    assert offer["unit_price"]["materials"]["items"][0]["amount_per_pc"] is None
+    assert not [c for c in offer["_derived"]["conflicts"] if c["kind"] == "material_price_uncorroborated"]
+    assert "materials" in offer["_derived"]["modules_with_missing_amounts"]
+
+
+def test_material_price_multiple_null_items_summed_for_gate():
+    """多个材料行都只印料价 → 以候选之和参与勾稽（0.5 + 0.46 = 0.96）。"""
+    offer = _material_offer(
+        materials=[
+            {"name": "铝合金", "amount_per_pc": None, "note": "料价 0.5"},
+            {"name": "锌合金", "amount_per_pc": None, "note": "料价 0.46"},
+        ]
+    )
+    derive_offer(offer)
+    items = offer["unit_price"]["materials"]["items"]
+    assert [i["amount_per_pc"] for i in items] == [0.5, 0.46]
+    assert offer["unit_price"]["materials"]["total"] == 0.96
+    assert offer["_derived"]["material_price_fallback"][0]["value"] == 0.96
+    assert offer["_derived"]["material_price_fallback"][0]["items"] == 2
+
+
+def test_material_price_partial_candidates_still_gated_on_sum():
+    """部分行有候选、部分行没有 → 只按有候选的量级勾稽（无候选行保持 null，
+    仍然记 amount_missing，避免把不完整合计当完整）。"""
+    offer = _material_offer(
+        materials=[
+            {"name": "铝合金", "amount_per_pc": None, "note": "料价 0.96"},
+            {"name": "锌合金", "amount_per_pc": None, "note": "未印出金额"},
+        ]
+    )
+    derive_offer(offer)
+    items = offer["unit_price"]["materials"]["items"]
+    assert items[0]["amount_per_pc"] == 0.96
+    assert items[1]["amount_per_pc"] is None
+    assert offer["_derived"]["modules_with_missing_amounts"] == {"materials": 1}
+
+
+def test_material_price_rule_skips_when_total_printed():
+    """单据印有材料费合计 → 交规则 B 处理，规则 D 不介入（避免重复计材料费）。"""
+    offer = _material_offer()
+    offer["unit_price"]["materials"]["total"] = 0.96
+    derive_offer(offer)
+    item = offer["unit_price"]["materials"]["items"][0]
+    assert item["amount_per_pc"] is None
+    assert "material_price_fallback" not in offer["_derived"]
+    assert not [c for c in offer["_derived"]["conflicts"] if c["kind"] == "material_price_uncorroborated"]
+
+
+def test_material_price_rule_idempotent():
+    """双跑（persist 路径不传 ir）结果一致：金额不重复累加，归档与冲突不累积。"""
+    offer = _material_offer()
+    derive_offer(offer)
+    first = copy.deepcopy(offer)
+    derive_offer(offer)
+    assert offer == first
+    assert len(offer["_derived"]["material_price_fallback"]) == 1
+    assert offer["_derived"]["conflicts"] == []
+
+    reject = _material_offer(final=18.7)
+    derive_offer(reject)
+    snapshot = copy.deepcopy(reject)
+    derive_offer(reject)
+    assert reject == snapshot
+    assert len([c for c in reject["_derived"]["conflicts"] if c["kind"] == "material_price_uncorroborated"]) == 1

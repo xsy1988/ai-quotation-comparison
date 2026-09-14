@@ -21,6 +21,15 @@ C. 无出处的税费金额视为缺失：税费条目 amount_per_pc 为 0 且 r
    有 rate 则派生 amount = rate×未税（去重后明细口径），note 注明"原抽取值 X 与出处
    不符，按税率×未税派生"；无 rate 则保留原值 + cross_validation_conflict。有出处的
    税费金额单据优先，不符只打标。
+D. 材料栏只印要素不印材料费时的兜底（勾稽背书，执行于 A 之后、未税/税费计算之前）：
+   materials 条目金额未印出（null）而 note/evidence 印出「料价」（每件材料单价，如
+   "料重 28；料价 0.96"）→ 料价即候选；候选须通过勾稽背书（候选计入未税后按税费条目
+   现值估算税额，含税与单据 final_unit_price_taxed 之差 ≤ 0.05 元/pcs）才照抄为材料费：
+   amount_per_pc=候选、note 追加派生标注、_derived.material_price_fallback 记录一次，
+   并从 modules_with_missing_amounts 摘掉 materials（否则残留 amount_missing 冲突与
+   calc_abnormal）。背书不通过或材料栏无料价 → 保持 null；有候选但背书不通过时写
+   material_price_uncorroborated 冲突说明拒绝原因。料价可能只是元/kg 单价（如
+   "材料单价 35"），故一律要求背书，绝不出现 料重×料价 这类乘积。
 
 随后 summary 全量重算：untaxed_total = 未税总额（一律按去重后明细金额：
 materials/processing/inspection/packaging_transport/other 条目 + sga_tax 非税费条目，
@@ -29,7 +38,8 @@ final_unit_price_taxed / discount 保留单据值不动，不一致追加 cross_
 LLM 原 summary 存档 offer["_derived"]["summary_llm_original"]。
 
 幂等：重复调用输出一致——重算基于自身输出仍是同一值，归档类字段（LLM 原 summary、
-派生标记、共享单元格记录、total 修正记录）只写一次，冲突明细每次确定性重放。
+派生标记、共享单元格记录、料价兜底记录、total 修正记录）只写一次，冲突明细每次确定性重放
+（规则 D 的拒绝分支不带状态：候选与背书判据都由自身输出重算，故重跑一致）。
 """
 
 import copy
@@ -50,6 +60,12 @@ TAX_ITEM_TYPE = "税费"
 DERIVED_TAX_NOTE = "派生值：税率×未税"
 """税费金额缺失、按税率派生时写入 item note 的标注。"""
 
+MATERIAL_MODULE = "materials"
+MATERIAL_PRICE_NOTE = "派生值：料价照抄为每件材料费（勾稽背书通过）"
+"""规则 D 兜底填材料费时写入 item note 的标注。"""
+MATERIAL_PRICE_TOLERANCE = 0.05
+"""规则 D 勾稽背书允差（元/pcs，与单据未税↔含税的 0.05 元勾稽口径一致）。"""
+
 CONFLICT_FLAG = "cross_validation_conflict"
 SHARED_CELL_FLAG = "shared_cell"
 CALC_ABNORMAL_FLAG = "calc_abnormal"
@@ -60,6 +76,11 @@ INSPECTION_NAME_KEYWORD = "检"
 """检验类科目名关键词（检/全检/检验 均含"检"），用于共享单元格 keeper 语义优先级。"""
 
 _TEXT_BEARING_RE = re.compile(r"[A-Za-z一-鿿]")
+
+_MATERIAL_PRICE_RE = re.compile(r"(?:料价|材料单价|料单价|材料价)\s*[:：=]?\s*(\d+(?:\.\d+)?)")
+_WEIGHT_RE = re.compile(r"(?:料重|单重|净重|重量)\s*[:：=]?\s*(\d+(?:\.\d+)?)")
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+"""规则 D 的料价/料重提取（只在 item.note 与 evidence.raw_text 上做，不碰源文件）。"""
 
 
 def _items_sum(items: list[dict]) -> float:
@@ -345,6 +366,149 @@ def _fix_module_totals(offer: dict, derived: dict, conflicts: list[dict],
         )
 
 
+def _module_contribution(up: dict, name: str) -> float:
+    """模块对未税总额的贡献：有明细按去重后明细金额（不用 total 字段，避免未修正的 total
+    污染税额派生）；无明细的模块回退 total（唯一信息源，无去重/修正风险）。"""
+    module = up.get(name) or {}
+    items = module.get("items") or []
+    if items:
+        return _items_sum(items)
+    return round(float(module["total"]), 6) if module.get("total") is not None else 0.0
+
+
+def _untaxed_of(up: dict) -> float:
+    """未税总额：未税模块贡献 + sga_tax 中的非税费条目金额。"""
+    return round(
+        sum(_module_contribution(up, name) for name in UNTAXED_MODULES)
+        + _items_sum(
+            [
+                item
+                for item in (up.get("sga_tax") or {}).get("items") or []
+                if item.get("item_type") != TAX_ITEM_TYPE
+            ]
+        ),
+        6,
+    )
+
+
+def _tax_item_of(up: dict) -> dict | None:
+    return next(
+        (
+            item
+            for item in (up.get("sga_tax") or {}).get("items") or []
+            if item.get("item_type") == TAX_ITEM_TYPE
+        ),
+        None,
+    )
+
+
+def _estimated_tax(up: dict, untaxed: float) -> float | None:
+    """按税费条目现值估算税额（规则 D 勾稽用，不改数据）：有出处的单据值优先，否则 rate×未税。"""
+    item = _tax_item_of(up)
+    if item is None:
+        return None
+    amount = item.get("amount_per_pc")
+    rate = item.get("rate")
+    raw_text = (item.get("evidence") or {}).get("raw_text")
+    if amount is not None and float(amount) != 0 and (
+        not raw_text or _provenance_in_raw(raw_text, float(amount))
+    ):
+        return float(amount)
+    if rate is not None:
+        return round(float(rate) * untaxed, 6)
+    return None
+
+
+def _material_price_candidate(item: dict) -> float | None:
+    """提取材料条目印出的「料价」（每件材料费候选），提取不到返回 None。
+
+    优先 note 中的料价/材料单价关键词；退一步：note 印了料重且 evidence.raw_text 恰好
+    两个数（料重/料价两列）→ 取非料重的那个。料价是否真是每件材料费由勾稽背书判定。
+    """
+    note = item.get("note") or ""
+    match = _MATERIAL_PRICE_RE.search(note)
+    if match and float(match.group(1)) > 0:
+        return float(match.group(1))
+    weight_match = _WEIGHT_RE.search(note)
+    raw_text = (item.get("evidence") or {}).get("raw_text") or ""
+    numbers = [float(number) for number in _NUMBER_RE.findall(raw_text)]
+    if weight_match and len(numbers) == 2:
+        others = [number for number in numbers if abs(number - float(weight_match.group(1))) > 1e-9]
+        if len(others) == 1 and others[0] > 0:
+            return others[0]
+    return None
+
+
+def _fill_material_prices(offer: dict, derived: dict, conflicts: list[dict]) -> None:
+    """规则 D：材料栏只印要素不印材料费时，勾稽背书通过则把料价照抄为材料费。"""
+    up = offer["unit_price"]
+    materials = up.get(MATERIAL_MODULE) or {}
+    items = materials.get("items") or []
+    if materials.get("total") is not None or not items:
+        return  # 单据印有材料费合计（归规则 B 处理）或材料栏无明细
+    pending = [
+        (index, item) for index, item in enumerate(items) if item.get("amount_per_pc") is None
+    ]
+    if not pending:
+        return
+    found = {
+        index: value
+        for index, item in pending
+        if (value := _material_price_candidate(item)) is not None
+    }
+    if not found:
+        return
+    candidate_sum = round(sum(found.values()), 6)
+    summary = up.get("summary") or {}
+    anchor = summary.get("final_unit_price_taxed")
+    untaxed_with = round(_untaxed_of(up) + candidate_sum, 6)
+    tax = _estimated_tax(up, untaxed_with)
+    expected = (
+        round(untaxed_with + tax - float(summary.get("discount") or 0), 6)
+        if tax is not None and anchor is not None
+        else None
+    )
+    # 允差比较前 round 到 6 位：两值本身均已 round，差值需消掉浮点噪声（18.645−18.595
+    # 浮点结果为 0.0500000000000007，按 ≤0.05 的口径应视为临界通过）
+    if expected is not None and round(abs(expected - float(anchor)), 6) <= MATERIAL_PRICE_TOLERANCE:
+        for index, value in found.items():
+            item = items[index]
+            note = item.get("note")
+            item["amount_per_pc"] = value
+            item["note"] = f"{note}；{MATERIAL_PRICE_NOTE}" if note else MATERIAL_PRICE_NOTE
+        # 归档只写一次（重跑时材料费已填，本规则提前返回）
+        derived.setdefault("material_price_fallback", []).append(
+            {
+                "module": MATERIAL_MODULE,
+                "value": candidate_sum,
+                "items": len(found),
+                "document_final_unit_price_taxed": float(anchor),
+                "derived_taxed_total": expected,
+                "detail": f"材料栏未印材料费，料价 {candidate_sum} 照抄为每件材料费"
+                          f"（计入后含税 {expected} 与单据含税单价 {anchor} 勾稽一致）",
+            }
+        )
+        # 金额已补齐：摘掉持久化的「金额未印出」记录，否则会残留 amount_missing 冲突
+        derived.get("modules_with_missing_amounts", {}).pop(MATERIAL_MODULE, None)
+        return
+    if expected is None:
+        reason = f"材料栏未印材料费，料价候选 {candidate_sum} 无法勾稽背书（缺单据含税单价或税费条目）"
+    else:
+        reason = (
+            f"材料栏未印材料费，料价候选 {candidate_sum} 勾稽不通过"
+            f"（计入后含税 {expected} vs 单据含税单价 {anchor}，允差 {MATERIAL_PRICE_TOLERANCE}）"
+        )
+    conflicts.append(
+        {
+            "kind": "material_price_uncorroborated",
+            "module": MATERIAL_MODULE,
+            "document_value": candidate_sum,
+            "derived_value": None,
+            "detail": f"{reason}，保持未印出（null）",
+        }
+    )
+
+
 def _resolve_tax(offer: dict, derived: dict, conflicts: list[dict], untaxed: float) -> float | None:
     """规则 C + 税费决策：无出处金额视为缺失按税率派生；有出处单据值优先（不符只打标）。"""
     up = offer["unit_price"]
@@ -419,8 +583,9 @@ def _resolve_tax(offer: dict, derived: dict, conflicts: list[dict], untaxed: flo
 
 
 def derive_offer(offer: dict, ir=None) -> list[str]:
-    """对单个 offer 应用派生重算规则（顺序：A 去重 → 未税 → C 税费 → B 模块 total → summary）。
+    """对单个 offer 应用派生重算规则。
 
+    顺序：A 去重 → D 料价兜底（勾稽背书）→ 未税 → C 税费 → B 模块 total → summary 重算。
     ir 可选（IR 对象或 dict）：提供时用于规则 B/C 的"单据出处"判定；不传则保守降级。
     就地修正并返回 flags 增量（shared_cell / cross_validation_conflict / calc_abnormal）。
     """
@@ -431,26 +596,11 @@ def derive_offer(offer: dict, ir=None) -> list[str]:
     # 规则 A：共享单元格去重（先执行，全库口径按去重后金额）；判不准不置零，打 calc_abnormal
     ambiguous_shared = _dedupe_shared_cells(offer, derived, conflicts)
 
-    # 未税总额：有明细的模块按去重后明细金额（不用 total 字段，避免未修正的 total 污染税额派生）；
-    # 无明细的模块回退 total（唯一信息源，无去重/修正风险）
-    def _module_contribution(name: str) -> float:
-        module = up.get(name) or {}
-        items = module.get("items") or []
-        if items:
-            return _items_sum(items)
-        return round(float(module["total"]), 6) if module.get("total") is not None else 0.0
+    # 规则 D：材料栏只印料价（未印材料费）时按勾稽背书兜底填材料费（在未税/税费计算之前）
+    _fill_material_prices(offer, derived, conflicts)
 
-    untaxed = round(
-        sum(_module_contribution(name) for name in UNTAXED_MODULES)
-        + _items_sum(
-            [
-                item
-                for item in (up.get("sga_tax") or {}).get("items") or []
-                if item.get("item_type") != TAX_ITEM_TYPE
-            ]
-        ),
-        6,
-    )
+    # 未税总额：有明细的模块按去重后明细金额（不用 total 字段，避免未修正的 total 污染税额派生）
+    untaxed = _untaxed_of(up)
 
     # 规则 C + 税费决策（sga_tax 的 total 在税费修正后于规则 B 中重算 Σitems）
     tax_amount = _resolve_tax(offer, derived, conflicts, untaxed)
