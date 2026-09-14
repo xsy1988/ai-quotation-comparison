@@ -27,7 +27,7 @@ _PROMPT_FILES = {
     "parse_quote": "parse_quote.md",
     "match_atoms": "match_atoms.md",
     "ocr_transcribe": "ocr_transcribe.md",
-    "ai_summary": "ai_summary.md",
+    "ai_analysis": "ai_analysis.md",
     "retry_feedback": "retry_feedback.md",
     "verify_calc": "verify_calc.md",
 }
@@ -37,12 +37,11 @@ _SYSTEM_PROMPTS: dict[str, str | None] = {
     "parse_quote": "你是采购报价单结构化解析助手，只输出 JSON。",
     "match_atoms": "你是工艺原子匹配助手，只输出 JSON。",
     "ocr_transcribe": None,
-    "ai_summary": (
+    "ai_analysis": (
         "你是一名资深采购比价顾问，擅长解读多家供应商的零件报价对比结果。"
         "你只依据输入的结构化对比数据作答，绝不臆造数字。"
         "所有引用的金额必须直接来自输入数据，禁止自行计算或编造。"
-        "用中文输出，以 markdown 段落组织（可用标题、列表、表格）。"
-        "输出必须是 JSON：{\"markdown\": \"<综合建议全文>\"}。"
+        "用中文输出，严格按给定 JSON schema 输出，不要输出 schema 之外的任何文字。"
     ),
     "verify_calc": "你是报价核算复核员，只核对数字逻辑，只输出 JSON。",
 }

@@ -3,7 +3,12 @@
 import pytest
 
 from app.db import get_connection, init_db
-from app.validate.validate import ValidateError, validate_enums, validate_quote_full
+from app.validate.validate import (
+    ValidateError,
+    module_total,
+    validate_enums,
+    validate_quote_full,
+)
 
 
 def make_quote() -> dict:
@@ -106,3 +111,11 @@ def test_validate_quote_full_schema_error_raises(conn_with_atom):
     with pytest.raises(ValidateError):
         validate_quote_full(conn_with_atom, data)
     conn_with_atom.close()
+
+
+def test_module_total_all_null_amounts_returns_none():
+    """明细金额全部未印出（null）时无可加项 → 返回 None（不得以 0.0 占位）。"""
+    assert module_total({"total": None, "items": [{"amount_per_pc": None}]}) is None
+    assert module_total({"total": None, "items": []}) is None
+    assert module_total({"total": None, "items": [{"amount_per_pc": 2.0}]}) == 2.0
+    assert module_total({"total": 3.0, "items": [{"amount_per_pc": None}]}) == 3.0

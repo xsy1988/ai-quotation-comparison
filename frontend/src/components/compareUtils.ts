@@ -33,12 +33,15 @@ export function warningSuppliers(
   })
 }
 
-/** 勾稽异常：calc_check 为 failed / warning（calc_check 通过则应为 "passed"，null = 未校验） */
-export const CALC_CHECK_BAD = new Set(['failed', 'warning'])
+/** 勾稽异常：后端 calc_check 只写 pass/fail（unchecked = 未校验），另兼容 failed/warning 历史值 */
+export const CALC_CHECK_BAD = new Set(['fail', 'failed', 'warning'])
 
 export function calcAbnormalSuppliers(comparison: Comparison): Supplier[] {
   return comparison.suppliers.filter(
-    (s) => s.calc_check !== null && CALC_CHECK_BAD.has(s.calc_check),
+    (s) =>
+      (s.calc_check !== null && CALC_CHECK_BAD.has(s.calc_check)) ||
+      // 派生重算发现的勾稽问题（如明细金额未印出导致模块合计只是下限）也会打 calc_abnormal 标
+      s.flags.includes('calc_abnormal'),
   )
 }
 

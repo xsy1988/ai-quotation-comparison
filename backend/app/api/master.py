@@ -19,7 +19,9 @@ from app.services.new_atom_service import _next_atom_code
 router = APIRouter(prefix="/api/master", tags=["master"])
 
 CATEGORY_CODE_RE = re.compile(r"^CAT-[A-Z0-9]+$")
-DIM_SCOPES = ("process_domain", "process_stage", "process_class", "custom")
+DRAWER_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+# 不参与对比抽屉的历史 scope（自定义分组只用于原子归档）；抽屉编码由 drawer 表提供
+NON_DRAWER_SCOPE = "custom"
 
 
 def _conflict(detail: str) -> HTTPException:
@@ -42,6 +44,18 @@ def _check_atom_members(conn: sqlite3.Connection, member_atoms: list[str]) -> No
     for code in member_atoms:
         if conn.execute("SELECT 1 FROM atom WHERE code = ?", (code,)).fetchone() is None:
             raise _bad(f"原子不存在：{code}")
+
+
+def _drawer_codes(conn: sqlite3.Connection) -> set[str]:
+    return {row["code"] for row in conn.execute("SELECT code FROM drawer")}
+
+
+def _check_dim_scope(conn: sqlite3.Connection, scope: str) -> None:
+    """分组 scope 必须是某个抽屉编码（进对比抽屉）或 non-drawer 的 custom。"""
+    codes = _drawer_codes(conn)
+    if scope != NON_DRAWER_SCOPE and scope not in codes:
+        options = ", ".join([NON_DRAWER_SCOPE, *sorted(codes)])
+        raise _bad(f"scope 非法：{scope}（可选 {options}）")
 
 
 # ========== 原子 ==========
@@ -468,6 +482,142 @@ def delete_category(code: str) -> dict:
         conn.close()
 
 
+# ========== 对比抽屉 ==========
+
+
+def _drawer_to_dict(row: sqlite3.Row, group_count: int = 0) -> dict:
+    return {
+        "code": row["code"],
+        "name": row["name"],
+        "is_builtin": bool(row["is_builtin"]),
+        "sort_order": row["sort_order"],
+        "group_count": group_count,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _drawer_group_count(conn: sqlite3.Connection, code: str) -> int:
+    return conn.execute("SELECT COUNT(*) FROM dim_group WHERE scope = ?", (code,)).fetchone()[0]
+
+
+@router.get("/drawers")
+def list_drawers() -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        rows = list(conn.execute("SELECT * FROM drawer ORDER BY sort_order, code"))
+        return {
+            "drawers": [_drawer_to_dict(row, _drawer_group_count(conn, row["code"])) for row in rows]
+        }
+    finally:
+        conn.close()
+
+
+class DrawerCreate(BaseModel):
+    code: str
+    name: str
+    sort_order: int | None = None
+
+
+class DrawerPatch(BaseModel):
+    name: str | None = None
+    sort_order: int | None = None
+
+
+@router.post("/drawers", status_code=201)
+def create_drawer(body: DrawerCreate) -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        code = body.code.strip()
+        name = body.name.strip()
+        if not DRAWER_CODE_RE.match(code):
+            raise _bad("抽屉编码需为小写字母开头的小写字母/数字/下划线组合（2-32 位）")
+        if code == NON_DRAWER_SCOPE:
+            raise _bad(f"抽屉编码 {NON_DRAWER_SCOPE} 为保留字，请换一个")
+        if not name:
+            raise _bad("抽屉名称不能为空")
+        if conn.execute("SELECT 1 FROM drawer WHERE code = ?", (code,)).fetchone():
+            raise _bad(f"抽屉编码已存在：{code}")
+        if conn.execute("SELECT 1 FROM drawer WHERE name = ?", (name,)).fetchone():
+            raise _bad(f"抽屉名称已存在：{name}")
+        order = body.sort_order
+        if order is None:
+            row = conn.execute("SELECT MAX(sort_order) AS m FROM drawer").fetchone()
+            order = (row["m"] or 0) + 10
+        with conn:
+            conn.execute(
+                "INSERT INTO drawer (code, name, sort_order) VALUES (?, ?, ?)", (code, name, order)
+            )
+        row = conn.execute("SELECT * FROM drawer WHERE code = ?", (code,)).fetchone()
+        return _drawer_to_dict(row)
+    except sqlite3.IntegrityError as e:
+        raise _conflict(f"数据冲突：{e}")
+    finally:
+        conn.close()
+
+
+@router.patch("/drawers/{code}")
+def patch_drawer(code: str, body: DrawerPatch) -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        existing = conn.execute("SELECT * FROM drawer WHERE code = ?", (code,)).fetchone()
+        if existing is None:
+            raise _not_found("抽屉", code)
+        if existing["is_builtin"]:
+            raise _bad("内置抽屉不可修改")
+        patch: dict = {}
+        if body.name is not None:
+            name = body.name.strip()
+            if not name:
+                raise _bad("抽屉名称不能为空")
+            if conn.execute(
+                "SELECT 1 FROM drawer WHERE name = ? AND code != ?", (name, code)
+            ).fetchone():
+                raise _bad(f"抽屉名称已存在：{name}")
+            patch["name"] = name
+        if body.sort_order is not None:
+            patch["sort_order"] = body.sort_order
+        if patch:
+            assignments = ", ".join(f"{k} = ?" for k in patch)
+            with conn:
+                conn.execute(
+                    f"""UPDATE drawer SET {assignments},
+                        updated_at = datetime('now', 'localtime') WHERE code = ?""",
+                    (*patch.values(), code),
+                )
+        row = conn.execute("SELECT * FROM drawer WHERE code = ?", (code,)).fetchone()
+        return _drawer_to_dict(row, _drawer_group_count(conn, code))
+    except sqlite3.IntegrityError as e:
+        raise _conflict(f"数据冲突：{e}")
+    finally:
+        conn.close()
+
+
+@router.delete("/drawers/{code}")
+def delete_drawer(code: str) -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        existing = conn.execute("SELECT * FROM drawer WHERE code = ?", (code,)).fetchone()
+        if existing is None:
+            raise _not_found("抽屉", code)
+        if existing["is_builtin"]:
+            raise _conflict("内置抽屉不可删除")
+        count = _drawer_group_count(conn, code)
+        if count:
+            raise _conflict(f"抽屉下已有分组 {count} 个，禁止删除")
+        with conn:
+            conn.execute("DELETE FROM drawer WHERE code = ?", (code,))
+        return {"code": code, "deleted": True}
+    except sqlite3.IntegrityError as e:
+        raise _conflict(f"抽屉已被引用，禁止删除：{e}")
+    finally:
+        conn.close()
+
+
 # ========== 抽屉分组 ==========
 
 
@@ -514,6 +664,7 @@ class DimGroupCreate(BaseModel):
 
 class DimGroupPatch(BaseModel):
     group_name: str | None = None
+    scope: str | None = None
     parent_code: str | None = None
     member_atoms: list[str] | None = None
 
@@ -521,6 +672,8 @@ class DimGroupPatch(BaseModel):
         patch = {}
         if self.group_name is not None:
             patch["group_name"] = self.group_name
+        if self.scope is not None:
+            patch["scope"] = self.scope
         if self.parent_code is not None:
             patch["parent_code"] = self.parent_code
         if self.member_atoms is not None:
@@ -559,8 +712,7 @@ def create_dim_group(body: DimGroupCreate) -> dict:
             raise _bad("字段 group_code 不能为空")
         if not group_name:
             raise _bad("字段 group_name 不能为空")
-        if body.scope not in DIM_SCOPES:
-            raise _bad(f"scope 非法：{body.scope}（可选 {DIM_SCOPES}）")
+        _check_dim_scope(conn, body.scope)
         if conn.execute("SELECT 1 FROM dim_group WHERE group_code = ?", (group_code,)).fetchone():
             raise _bad(f"分组编码已存在：{group_code}")
         _check_group_parent(conn, group_code, body.parent_code)
@@ -599,6 +751,8 @@ def patch_dim_group(group_code: str, body: DimGroupPatch) -> dict:
         patch = body.to_patch()
         if existing["is_builtin"] and ("group_name" in patch or "parent_code" in patch):
             raise _bad("内置分组仅支持修改成员")
+        if "scope" in patch:
+            _check_dim_scope(conn, patch["scope"])
         if "group_name" in patch:
             if not patch["group_name"].strip():
                 raise _bad("字段 group_name 不能为空")

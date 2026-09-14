@@ -21,12 +21,12 @@ ALL_TEMPLATES = [
     "parse_quote",
     "match_atoms",
     "ocr_transcribe",
-    "ai_summary",
+    "ai_analysis",
     "retry_feedback",
     "verify_calc",
 ]
 
-TASKS = ["parse_quote", "match_atoms", "ocr_transcribe", "ai_summary"]
+TASKS = ["parse_quote", "match_atoms", "ocr_transcribe", "ai_analysis"]
 
 
 def test_all_templates_loadable_and_semver_version():
@@ -42,6 +42,16 @@ def test_fewshot_negative_loadable():
         encoding="utf-8"
     )
     assert "创锋" in text and "2.01" in text
+
+
+def test_parse_quote_forbids_sensitive_info_in_other_info():
+    """other_info 的排除清单：个人身份/签章信息 + 银行开户等收款信息，且不得以变形形式保留。"""
+    text = prompts.get_prompt("parse_quote")
+    assert "严格禁止写入" in text
+    assert "银行账号" in text and "开户" in text
+    for token in ("手机号", "姓名", "邮箱", "印章"):
+        assert token in text
+    assert "不得以任何变形" in text
 
 
 def test_prompt_version_constant():
@@ -77,8 +87,10 @@ def test_build_messages_missing_var_raises():
 
 def test_build_retry_messages():
     for kind, marker in (
-        ("json_unparseable", "上次输出有误"),
+        ("json_unparseable", "上次输出无法解析"),
         ("schema_invalid", "quote_schema v1.1"),
+        # traceability 反馈必须给出可执行修法（历史事故：笼统的「找不到的填 null」不可执行）
+        ("traceability", "amount_not_in_ir"),
     ):
         messages = prompts.build_retry_messages(kind, ["$.offers[0].basic.currency: 枚举校验失败"])
         assert [m["role"] for m in messages] == ["assistant", "user"]
@@ -95,7 +107,7 @@ def test_constitution_in_every_task_prompt():
             "parse_quote": {"categories": "c", "ir_serialized": "s|1|1:v"},
             "match_atoms": {"category": "c", "candidates": "x", "items": "y"},
             "ocr_transcribe": {},
-            "ai_summary": {"comparison": "{}"},
+            "ai_analysis": {"comparison": "{}"},
         }[task]
         user = prompts.build_messages(task, context)[-1]["content"]
         # constitution 全文（逐条宪法）拼在任务模板之前
@@ -169,3 +181,18 @@ def test_template_schema_fields_exist_in_quote_schema():
     parse_quote = prompts.get_prompt("parse_quote")
     for field in ("unit_price", "sga_tax"):
         assert field in parse_quote
+
+
+def test_ai_analysis_prompt_explains_null_semantics():
+    """null 纪律：null 模块合计不是 0，须在劣势/风险里点明「未印出，合计只是下限」。"""
+    text = prompts.get_prompt("ai_analysis")
+    assert "null 语义" in text
+    assert "不是 0" in text and "只是下限" in text
+    assert "calc_abnormal" in text
+
+
+def test_ai_analysis_prompt_keeps_input_supplier_order():
+    """顺序纪律：输出的 suppliers 顺序必须与输入一致（= 比价表格的供应商列顺序），
+    否则「AI 分析」与「报价对比」两张表的列前后对不上。"""
+    text = prompts.get_prompt("ai_analysis")
+    assert "不要按价格重排" in text

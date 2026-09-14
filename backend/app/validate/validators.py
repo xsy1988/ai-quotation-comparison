@@ -5,8 +5,12 @@
   信封结构有任一问题时短路（深层校验无意义）。
 - L1 溯源（validate_l1_traceability，ir 必传）：金额必须能在条目自身 evidence.raw_text
   中找到（词边界口径，"0" 不会误中 "13.0"）、坐标必须落在 IR 单元格范围内；抽取错误
-  blame=A，可反馈 LLM 重抽取。例外：税费金额无出处但 rate 非空时脚本可兜底派生，
-  金额强制置 null 并降级 warning（blame=B，不触发重试）；非税费 0 金额豁免出处校验。
+  blame=A，可反馈 LLM 重抽取。金额溯源另有 IR 兜底：raw_text 不是原文（坐标 / IR 序列化
+  片段 → raw_text_not_verbatim）、或金额在单据任何单元格中都不存在（amount_not_in_ir）
+  时告警，用于抓住「raw_text 与金额一起被编造」的循环论证。例外：税费金额无出处但 rate
+  非空时脚本可兜底派生，金额强制置 null 并降级 warning（blame=B，不触发重试）；非税费 0
+  金额豁免出处校验。evidence_location_mismatch 是独立函数 validate_l1_evidence_consistency
+  的 warning（只诊断，不进重试清单）。
 - L2 勾稽（validate_l2_reconcile）：模块 total≠Σitems、summary 不闭合、税费≠税率×未税、
   疑似同值重复；计算/勾稽类 blame=B，本期只记录不触发重试（P4 接 LLM-B）。
 
@@ -21,7 +25,7 @@ from typing import Any, Iterator
 
 from jsonschema import Draft7Validator
 
-from app.derive import _shared_group_decision, _shared_group_keeper
+from app.derive import _has_provenance_in_ir, _ir_numeric_values, _shared_group_decision, _shared_group_keeper
 from app.ir import IR
 from app.normalize import amount_in_text
 from app.validate.validate import (
@@ -144,6 +148,58 @@ def parse_location(location: str | None) -> tuple[str | None, int, int, int, int
     return None
 
 
+_IR_SERIAL_TOKEN_RE = re.compile(r"(?:^|\|)\s*\d+\s*:")
+_COORD_ONLY_RES = (
+    re.compile(r"(?:[^!]{0,40}!)?R\d+C\d+(?:\s*[::\-~]\s*(?:[^!]{0,40}!)?R\d+C\d+)?", re.IGNORECASE),
+    re.compile(r"\d+\s*:\s*\d+"),
+)
+
+
+def _looks_like_ir_serialization(text: str) -> bool:
+    """是否是 IR 序列化片段（如 "8:1|9:28|10:0.96"）：≥2 个 "数字:" 片段且以 | 分隔。"""
+    if "|" not in text:
+        return False
+    return len(_IR_SERIAL_TOKEN_RE.findall(text)) >= 2
+
+
+def _raw_text_not_verbatim(raw_text: str, location: Any) -> str | None:
+    """raw_text 是否明显不是所引单元格的原文（而是坐标 / IR 序列化片段）。
+
+    返回原因文本，看不出问题返回 None。用于堵住「raw_text 由模型自己编造」的循环论证漏洞：
+    只要 raw_text 不是原文，后面拿它做金额溯源就没有意义。
+    """
+    text = raw_text.strip()
+    if isinstance(location, str) and text and text == location.strip():
+        return "raw_text 与 evidence.location 完全相同，填的是坐标而不是单元格原文"
+    if _looks_like_ir_serialization(text):
+        return "raw_text 是 IR 序列化片段（列号:值 用 | 拼接），不是单元格原文"
+    if any(pattern.fullmatch(text) for pattern in _COORD_ONLY_RES):
+        return "raw_text 只有行列坐标，不是单元格原文"
+    return None
+
+
+def _ir_texts(ir: IR) -> str:
+    """IR 全部单元格文本 + 文本块拼接：模型无法伪造的证据来源（用于「数字印在长文本里」的场景）。"""
+    parts: list[str] = []
+    for table in ir.tables:
+        parts.extend(str(c.value) for c in table.cells if c.value is not None and c.value != "")
+    parts.extend(block.text for block in ir.blocks if block.text)
+    return "\n".join(parts)
+
+
+def _amount_in_document(ir: IR, value: float) -> bool:
+    """金额是否真实存在于单据中（IR 是模型无法伪造的证据源）。
+
+    IR 无任何可比对内容（如纯图片、无文本层）时返回 True：无法判定就不判定，避免误杀。
+    """
+    text = _ir_texts(ir)
+    if not text.strip():
+        return True
+    if _has_provenance_in_ir(_ir_numeric_values(ir), value):
+        return True
+    return amount_in_text(text, value)
+
+
 def _sheet_ranges(ir: IR) -> dict[str, tuple[int, int]]:
     """IR → {sheet: (最大行号, 最大列号)}（以实际出现过的单元格为准）。"""
     ranges: dict[str, list[int]] = {}
@@ -230,6 +286,10 @@ def validate_l1_traceability(envelope: dict, ir: IR | dict) -> list[Issue]:
        金额为 0 时豁免（0 在单据里到处出现，出处比对必然误报）。税费条目特例 →
        tax_amount_not_in_evidence：rate 非空时脚本可按 税率×未税 兜底派生，不再硬失败——
        amount 强制置 null 并降级 warning（blame=B，继续流程）；rate 也为空时才硬失败。
+    1b. IR 兜底（raw_text 由模型自己写，单看它是循环论证）：raw_text 明显不是单元格原文
+       （坐标 / IR 序列化片段）→ raw_text_not_verbatim；金额在单据任何单元格中都不存在
+       → amount_not_in_ir（编造值，含自作算术）；金额存在但在 raw_text 里没写对时，
+       amount_not_in_evidence 的 detail 会说明「疑似抄错单元格」还是「单据中不存在」。
     2. 坐标存在性：evidence.location 的 sheet 必须存在于 IR、行/列在单元格范围内
        → invalid_location（blame=A）。
     3. evidence 缺失：无 evidence 或 raw_text 为空 → missing_evidence（info 级，只记录）。
@@ -257,9 +317,37 @@ def validate_l1_traceability(envelope: dict, ir: IR | dict) -> list[Issue]:
             if amount is None or isinstance(amount, bool) or not raw_text:
                 continue
             value = float(amount)
-            if amount_in_text(raw_text, value):
-                continue
             is_tax = module_path == "unit_price.sga_tax" and item.get("item_type") == TAX_ITEM_TYPE
+            verbatim_problem = _raw_text_not_verbatim(raw_text, location)
+            if verbatim_problem:
+                # raw_text 不是原文 → 金额溯源本身失去意义，先报原文问题（可反馈重抽取）
+                issues.append(Issue(
+                    path=f"{base_path}.evidence.raw_text", issue="raw_text_not_verbatim",
+                    detail=f"{verbatim_problem}：『{raw_text}』",
+                    expected="所引用单元格的原文文本（照抄内容，不要写坐标或 IR 序列化片段）",
+                    actual=raw_text, evidence=issue_evidence, blame="A",
+                ))
+                if not is_tax and value != 0 and not _amount_in_document(ir, value):
+                    # 原文不可信 + 全部单元格里都没有这个数 → 编造值（含自行算术推导）
+                    issues.append(Issue(
+                        path=f"{base_path}.{amount_key}", issue="amount_not_in_ir",
+                        detail=f"金额 {value} 不在单据任何单元格中（单据未印出的金额应填 null，"
+                               f"禁止自行相乘/相加）",
+                        expected="单据上印出的金额，找不到则填 null", actual=value,
+                        evidence=issue_evidence, blame="A",
+                    ))
+                continue
+            if amount_in_text(raw_text, value):
+                if not is_tax and value != 0 and not _amount_in_document(ir, value):
+                    # 数字在 raw_text 里、却不在单据里：raw_text 连同金额一起被编造
+                    issues.append(Issue(
+                        path=f"{base_path}.{amount_key}", issue="amount_not_in_ir",
+                        detail=f"金额 {value} 虽出现在 evidence.raw_text『{raw_text}』中，"
+                               f"但不在单据任何单元格中，raw_text 与金额均不可信",
+                        expected="单据上印出的金额，找不到则填 null", actual=value,
+                        evidence=issue_evidence, blame="A",
+                    ))
+                continue
             if not is_tax and value == 0:
                 continue  # 0 在单据里到处出现，豁免金额出处校验（双保险，词边界已过滤大半）
             if is_tax and item.get("rate") is not None:
@@ -282,11 +370,64 @@ def validate_l1_traceability(envelope: dict, ir: IR | dict) -> list[Issue]:
                     evidence=issue_evidence, blame="A",
                 ))
             else:
+                elsewhere = _amount_in_document(ir, value)
                 issues.append(Issue(
                     path=f"{base_path}.{amount_key}", issue="amount_not_in_evidence",
-                    detail=f"金额 {value} 未出现在 evidence.raw_text『{raw_text}』中",
+                    detail=f"金额 {value} 未出现在 evidence.raw_text『{raw_text}』中"
+                           + ("（该数字在单据其它单元格中存在，疑似抄错单元格）" if elsewhere else
+                              "（该数字在单据任何单元格中都不存在，属编造值：单据未印出的金额应填 null，"
+                              "禁止自行相乘/相加）"),
                     expected="raw_text 中出现的金额，找不到则填 null",
                     actual=value, evidence=issue_evidence, blame="A",
+                ))
+    return issues
+
+
+def validate_l1_evidence_consistency(envelope: dict, ir: IR | dict) -> list[Issue]:
+    """evidence 一致性（诊断用，warning/blame=B，不影响流程、不触发重试）：
+
+    raw_text 与所引 location 的单元格原文不符时提示。单独成函数是为了不污染
+    validate_l1_traceability 的错误清单（该清单参与重试路由，语义必须保持稳定）。
+    """
+    if isinstance(ir, dict):
+        ir = IR.from_dict(ir)
+    cell_text: dict[tuple[str, int, int], str] = {}
+    for table in ir.tables:
+        for cell in table.cells:
+            if cell.value is not None and cell.value != "":
+                cell_text[(table.sheet, table.row_number, cell.col)] = str(cell.value)
+    issues: list[Issue] = []
+    for offer_index, offer in enumerate(iter_offers(envelope)):
+        for module_path, item_index, amount_key, item in _iter_amount_items(offer):
+            evidence = item.get("evidence") or {}
+            raw_text = evidence.get("raw_text")
+            location = evidence.get("location")
+            if not raw_text or not location:
+                continue
+            parsed = parse_location(location)
+            if parsed is None:
+                continue
+            sheet, row1, row2, col1, col2 = parsed
+            sheets = [sheet] if sheet in ir.sheets else (ir.sheets if sheet is None else [])
+            if len(sheets) != 1:
+                continue
+            text = raw_text.strip()
+            cited = [
+                cell_text[(sheets[0], row, col)]
+                for row in range(row1, row2 + 1)
+                for col in range(col1, col2 + 1)
+                if (sheets[0], row, col) in cell_text
+            ]
+            if not cited or any(text == cell or text in cell or cell in text for cell in cited):
+                continue
+            if any(text in value or value in text for value in cell_text.values()):
+                issues.append(Issue(
+                    path=f"offers[{offer_index}].{module_path}.items[{item_index}]",
+                    issue="evidence_location_mismatch", level="warning",
+                    detail=f"evidence.raw_text『{raw_text}』与 location『{location}』单元格原文"
+                           f"（{' / '.join(cited)}）不符，该原文出现在其它单元格",
+                    expected="raw_text 照抄 location 所指单元格的原文",
+                    actual=raw_text, evidence={"location": location, "raw_text": raw_text}, blame="B",
                 ))
     return issues
 

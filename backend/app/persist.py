@@ -136,8 +136,10 @@ def collect_flags(data: dict, check: str) -> list[str]:
         flags.append("cross_validation_conflict")
     if derived.get("shared_cells"):
         flags.append("shared_cell")
-    # 共享单元格判不准（未置零，待人工核对）
+    # 共享单元格判不准（未置零，待人工核对）/ 明细金额未印出（合计只是下限）
     if any(c.get("kind") == "shared_cell_ambiguous" for c in derived.get("conflicts") or []):
+        flags.append("calc_abnormal")
+    if any(c.get("kind") == "amount_missing" for c in derived.get("conflicts") or []):
         flags.append("calc_abnormal")
     # 去重保持顺序稳定
     return list(dict.fromkeys(flags))
@@ -191,6 +193,7 @@ def persist_quote(
                 module_total(up["other"]),
                 module_total(tooling) if tooling and tooling.get("total") is not None
                 else (sum(module_total(tooling[k]) or 0 for k in ("molds", "fixtures", "stencils")) if tooling else None),
+                data.get("other_info") or None,
                 file_hash,
                 json.dumps(flags, ensure_ascii=False),
                 check,
@@ -201,6 +204,7 @@ def persist_quote(
                                final_unit_price_taxed=?, untaxed_total=?, tax_amount=?, discount=?,
                                materials_total=?, processing_total=?, inspection_total=?,
                                packaging_transport_total=?, sga_tax_total=?, other_total=?, tooling_total=?,
+                               other_info=?,
                                file_hash=?, flags=?, parse_status='parsed', calc_check=?,
                                updated_at=datetime('now', 'localtime') WHERE id=?""",
                     (*column_values, quote_id),
@@ -215,9 +219,9 @@ def persist_quote(
                         final_unit_price_taxed, untaxed_total, tax_amount, discount,
                         materials_total, processing_total, inspection_total,
                         packaging_transport_total, sga_tax_total, other_total, tooling_total,
-                        raw_json_path, file_hash, flags, parse_status, calc_check)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'parsed', ?)""",
-                    (task_id, *column_values[:15], None, *column_values[15:]),
+                        other_info, raw_json_path, file_hash, flags, parse_status, calc_check)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'parsed', ?)""",
+                    (task_id, *column_values[:16], None, *column_values[16:]),
                 )
                 quote_id = cur.lastrowid
 

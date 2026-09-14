@@ -12,12 +12,20 @@ offers 按"产品 × 报价方案"拆分：同产品多方案、多产品报价�
 L0 通过后跑 L1 溯源校验（金额必须在自身 evidence.raw_text 中、坐标必须落在 IR 范围内，
 traceability 反馈），第 3 轮仍失败抛 LLMValidateError。L1 通过（或仅 info 级）时 L2 勾稽
 问题（blame=B）写入 attempts 末条 l2_issues 只记录不打断。
+每个 LLM 轮次都会把原始输出与校验结果落盘到 {data_dir}/llm_trace/{file_hash}_r{n}.json
+（LLM_TRACE=0 关闭）——失败轮此前什么都不留，事后无法复盘；L1 无论 L0 是否通过都算一遍并
+入档（schema 报错会掩盖真正的首因）；两轮输出完全一致（模型未做任何修改）时提前终止，
+不再空烧剩余轮次。
+
 成功后跑 cross_check：独立脚本侧解析（自带简化关键词分类器，不复用规则解析器）
 与 LLM 条目按 evidence.location 行号对账，差异写 _cross_check 供 persist 落库。
 """
 
+import json
+import os
 import re
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft7Validator
@@ -28,10 +36,17 @@ from app.llm import client as llm_client
 from app.llm.client import LLMError, LLMUnavailable
 from app.normalize import normalize_amount
 from app.validate.validate import MODULES, iter_offers, load_envelope_schema, load_schema
-from app.validate.validators import validate_l1_traceability, validate_l2_reconcile
+from app.validate.validators import (
+    validate_l1_evidence_consistency,
+    validate_l1_traceability,
+    validate_l2_reconcile,
+)
 
 MAX_ATTEMPTS = 3
 """LLM 版面理解最大尝试轮数（含首轮）：schema/溯源/解析失败均按此上限重试。"""
+
+LLM_TRACE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "llm_trace"
+"""每轮 LLM 原始输出落盘目录（数据目录，非源码）；LLM_TRACE=0 时不写。"""
 
 # conn 不可用时兜底品类清单（与 scripts/import_master_data.py 保持一致）
 DEFAULT_CATEGORIES = [
@@ -332,6 +347,68 @@ def cross_check(ir: IR | dict, data: dict) -> dict:
 # 主入口
 # ---------------------------------------------------------------------------
 
+def _trace_attempt(ir: IR, attempt: dict, output: Any) -> None:
+    """把该轮原始输出 + 校验结果落盘：{data_dir}/llm_trace/{file_hash}_r{n}.json。
+
+    失败轮此前不留任何痕迹，事后只能靠猜复现（本次回归的教训）。写盘失败不影响主流程，
+    设 LLM_TRACE=0 可完全关闭。
+    """
+    if os.environ.get("LLM_TRACE", "1") == "0":
+        return
+    try:
+        LLM_TRACE_DIR.mkdir(parents=True, exist_ok=True)
+        path = LLM_TRACE_DIR / f"{ir.file_hash[:8]}_r{attempt['round']}.json"
+        path.write_text(
+            json.dumps(
+                {"source_file": ir.source_file, "file_hash": ir.file_hash,
+                 "attempt": attempt, "output": output},
+                ensure_ascii=False, indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _safe_l1(envelope: Any, ir: IR) -> list:
+    """L1 溯源校验（容错）：L0 都没过的 payload 可能缺字段，校验器不允许拖垮主流程。"""
+    if not isinstance(envelope, dict):
+        return []
+    try:
+        return validate_l1_traceability(envelope, ir)
+    except Exception:
+        return []
+
+
+def _safe_consistency(envelope: Any, ir: IR) -> list:
+    """evidence 一致性诊断（容错）：只入档诊断，不参与重试路由。"""
+    if not isinstance(envelope, dict):
+        return []
+    try:
+        return validate_l1_evidence_consistency(envelope, ir)
+    except Exception:
+        return []
+
+
+def _safe_diagnostics(run, fallback):
+    """后置诊断（L2 勾稽 / 脚本侧对账）容错：产出只供记录与落库标记，不该让已通过
+    L0+L1 的解析整体失败（曾因 IR 噪声触发的 ValueError 把一个文件判成 failed）。
+    返回 (结果, 异常描述)；异常描述写入 attempts 与 parse_log 便于排查。"""
+    try:
+        return run(), None
+    except Exception as e:
+        return fallback, f"{type(e).__name__}: {e}"
+
+
+def _attempt_kind(errors: list[str] | None, l1_issues: list) -> str:
+    """该轮失败类型：schema_invalid / traceability / ok（写入 attempts 便于事后复盘）。"""
+    if errors:
+        return "schema_invalid"
+    if l1_issues:
+        return "traceability"
+    return "ok"
+
+
 def parse_ir_with_llm_traced(
     ir: IR | dict, *, conn: sqlite3.Connection | None = None, chat_fn=None, progress_cb=None
 ) -> tuple[dict, list[dict], dict]:
@@ -342,6 +419,8 @@ def parse_ir_with_llm_traced(
     中找到出处）。重试上限 3 轮：schema 类错误按 schema_invalid 反馈、JSON 解析失败按
     json_unparseable 反馈、L1 抽取错误（blame=A 且非 info 级）按 traceability 反馈；
     第 3 轮仍失败抛 LLMValidateError（带 attempts 与最终问题清单）。
+    每轮的原始输出与校验结果都会落盘 llm_trace/{file_hash}_r{n}.json（LLM_TRACE=0 关闭）；
+    若某轮输出与上一轮完全一致（模型对 retry 反馈零响应），立即终止，不再空烧剩余轮次。
     L1 通过（或仅 info 级）时返回，L2 勾稽问题（blame=B，只记录）写入 attempts
     末条记录的 l2_issues 字段，供 parse_log 追溯、不打断流程。
 
@@ -367,6 +446,8 @@ def parse_ir_with_llm_traced(
 
     attempts: list[dict] = []
     last_errors: list[str] = []
+    prev_signature: str | None = None  # 上一轮成功解析出的输出指纹（探测"零进展"重试）
+    stalled = False
     for round_no in range(1, MAX_ATTEMPTS + 1):
         try:
             parsed, usage = fn(messages)
@@ -374,9 +455,11 @@ def parse_ir_with_llm_traced(
             raise
         except LLMError as e:
             last_errors = [str(e)]
-            attempts.append({"round": round_no, "usage": None,
-                             "validation_errors": last_errors, "l1_issues": None,
-                             "prompt_version": prompt_version})
+            attempt = {"round": round_no, "usage": None, "kind": "json_unparseable",
+                       "validation_errors": last_errors, "l1_issues": None,
+                       "prompt_version": prompt_version}
+            attempts.append(attempt)
+            _trace_attempt(ir, attempt, None)
             if round_no < MAX_ATTEMPTS:
                 _emit_retry(round_no, "json_unparseable", last_errors)
                 messages = messages + prompts.build_retry_messages("json_unparseable", last_errors)
@@ -389,33 +472,65 @@ def parse_ir_with_llm_traced(
             for offer in parsed.get("offers") or []:
                 _strip_disallowed_nulls(offer, load_schema())
             errors = _validate(parsed)
-        l1_issues = [
-            issue for issue in validate_l1_traceability(parsed, ir)
-            if issue.blame == "A" and issue.level != "info"
-        ] if not errors else []
-        attempts.append({"round": round_no, "usage": usage,
-                         "validation_errors": errors or None,
-                         "l1_issues": [issue.to_dict() for issue in l1_issues] or None,
-                         "prompt_version": prompt_version})
+        # L1 无论 L0 是否通过都算：schema 报错会掩盖真正的首因（如"填 0 占位"背后的编造金额），
+        # 只有把溯源问题一并入档，事后复盘才看得到真正原因；路由逻辑不变（仍按 blame=A 过滤）。
+        l1_all = _safe_l1(parsed, ir)
+        l1_issues = [i for i in l1_all if i.blame == "A" and i.level != "info"]
+        l1_warnings = [
+            i.to_dict() for i in l1_all if i.level != "error"
+        ] + [
+            i.to_dict() for i in _safe_consistency(parsed, ir)
+        ]
+        attempt = {"round": round_no, "usage": usage,
+                   "kind": _attempt_kind(errors, l1_issues),
+                   "validation_errors": errors or None,
+                   "l1_issues": [issue.to_dict() for issue in l1_issues] or None,
+                   "l1_warnings": l1_warnings or None,
+                   "prompt_version": prompt_version}
+        attempts.append(attempt)
+        _trace_attempt(ir, attempt, parsed)
         if not errors and not l1_issues:
-            l2_issues = validate_l2_reconcile(parsed)
+            l2_issues, l2_error = _safe_diagnostics(
+                lambda: validate_l2_reconcile(parsed), []
+            )
+            cross, cross_error = _safe_diagnostics(
+                lambda: cross_check(ir, parsed), {"item_conflicts": 0, "total_conflicts": []}
+            )
+            diag_error = l2_error or cross_error
             attempts[-1]["l2_issues"] = [issue.to_dict() for issue in l2_issues] or None
-            cross = cross_check(ir, parsed)
+            attempts[-1]["diagnostic_error"] = diag_error
+            if diag_error:  # 诊断失败只记录：解析结果本身已通过 L0+L1
+                cross = dict(cross or {})
+                cross["diagnostic_error"] = diag_error
             return parsed, attempts, cross
-        if round_no == MAX_ATTEMPTS:
-            break
         if errors:
             last_errors = errors
-            _emit_retry(round_no, "schema_invalid", errors)
-            messages = messages + prompts.build_retry_messages("schema_invalid", errors)
+            kind = "schema_invalid"
         else:
             last_errors = [f"{issue.path}: {issue.issue}，{issue.detail}" for issue in l1_issues]
-            _emit_retry(round_no, "traceability", last_errors)
-            messages = messages + prompts.build_retry_messages("traceability", last_errors)
+            kind = "traceability"
+        if round_no == MAX_ATTEMPTS:
+            break
+        signature = json.dumps(parsed, sort_keys=True, ensure_ascii=False)
+        if signature == prev_signature:
+            # 模型原样吐回上一轮结果：retry 反馈没起作用，再烧轮次也只是重复同样的输出
+            stalled = True
+            break
+        prev_signature = signature
+        _emit_retry(round_no, kind, last_errors)
+        messages = messages + prompts.build_retry_messages(kind, last_errors)
 
+    summary = "；".join(
+        f"第{a['round']}轮 {a.get('kind', '?')}"
+        f"(schema {len(a['validation_errors'] or [])} 项，溯源 {len(a['l1_issues'] or [])} 项)"
+        for a in attempts
+    )
     raise LLMValidateError(
         f"LLM 版面理解输出 {MAX_ATTEMPTS} 次均不符合 schema/溯源校验，最后错误：\n"
-        + "\n".join(last_errors[:10]),
+        + "\n".join(last_errors[:10])
+        + (f"\n{len(attempts)} 轮输出与上一轮完全一致（模型无进展），已提前终止。" if stalled else "")
+        + f"\n各轮情况：{summary}"
+        + f"\n逐轮原始输出见 {LLM_TRACE_DIR}（LLM_TRACE=0 可关闭）。",
         attempts,
     )
 

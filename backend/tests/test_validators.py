@@ -11,9 +11,11 @@ from app.validate.validators import (
     parse_location,
     run_validators,
     validate_l0_schema,
+    validate_l1_evidence_consistency,
     validate_l1_traceability,
     validate_l2_reconcile,
 )
+from app.validate.validate import load_schema
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ALL_MODULES = ("materials", "processing", "inspection", "packaging_transport", "sga_tax", "other")
@@ -157,7 +159,7 @@ def test_l1_invalid_location_unknown_sheet_multi_sheet_hard_error():
         "sheets": ["报价单A", "报价单B"], "blocks": [],
         "tables": [
             {"sheet": "报价单A", "row_number": 4,
-             "cells": [{"row": 4, "col": c, "value": "x"} for c in range(1, 8)]},
+             "cells": [{"row": 4, "col": c, "value": "3.00" if c == 3 else "x"} for c in range(1, 8)]},
             {"sheet": "报价单B", "row_number": 4,
              "cells": [{"row": 4, "col": c, "value": "y"} for c in range(1, 8)]},
         ],
@@ -188,7 +190,7 @@ def test_l1_location_rc_range_with_spaced_sheet_name():
         "source_file": "脱敏材料2.xlsx", "file_hash": "h", "file_type": "xlsx",
         "sheets": ["CNC5分钟 (2)"], "blocks": [],
         "tables": [{"sheet": "CNC5分钟 (2)", "row_number": 9,
-                    "cells": [{"row": 9, "col": c, "value": "x"} for c in range(1, 8)]}],
+                    "cells": [{"row": 9, "col": c, "value": "3.00" if c == 3 else "x"} for c in range(1, 8)]}],
     })
     env = _envelope([_item(3.0, "3.00", location="CNC5分钟 (2)!R9C3:R9C7")])
     assert validate_l1_traceability(env, ir) == []
@@ -217,6 +219,62 @@ def test_l1_issue_json_serializable():
 
 def test_l0_chuangfeng_fixture_passes():
     assert validate_l0_schema(load_fixture("envelope_chuangfeng_two_offers.json")) == []
+
+
+def test_l0_all_required_amount_fields_allow_null():
+    """契约：schema 中「必填」的金额字段必须是 number|null。
+
+    宪法/parse_quote/fewshot/retry_feedback 都要求「单据没印出的金额填 null」，而 L1 也会把
+    无出处的税费金额强制置 null；若 schema 只允许 number，模型只能编造（历史事故：4/4 文件
+    第 1 轮全部因 sga_tax.items[].amount_per_pc: None is not of type 'number' 失败，
+    并有模型显式写下「填 0 占位以满足 schema number 类型要求」）。
+    """
+    schema = load_schema()
+    offenders = []
+
+    def walk(node, path):
+        if not isinstance(node, dict):
+            return
+        required = node.get("required") or []
+        for name, prop in (node.get("properties") or {}).items():
+            if not isinstance(prop, dict):
+                continue
+            here = f"{path}.{name}" if path else name
+            if name in ("amount", "amount_per_pc") and name in required and prop.get("type") == "number":
+                offenders.append(here)
+            walk(prop, here)
+            if prop.get("type") == "array" and isinstance(prop.get("items"), dict):
+                walk(prop["items"], f"{here}[]")
+
+    walk(schema, "")
+    assert not offenders, f"以下必填金额字段禁止 null，与「缺失即 null」的提示词契约冲突: {offenders}"
+
+
+def test_l0_module_item_amount_may_be_null():
+    """契约：单据只印出计算要素（料重 28 / 料价 0.96）而未印出金额时，amount_per_pc 填 null，
+    要素原文写进 note，LLM 不得自行相乘 —— 这种输出必须能通过 L0。"""
+    envelope = load_fixture("envelope_chuangfeng_two_offers.json")
+    offer = envelope["offers"][0]
+    up = offer["unit_price"]
+    up["materials"]["items"] = [{
+        "name": "铝材", "amount_per_pc": None, "spec": "AL1070",
+        "note": "料重 28 / 料价 0.96（单据未印材料费金额，未做乘法）", "evidence": None,
+    }]
+    up["processing"]["items"][0]["amount_per_pc"] = None
+    up["sga_tax"]["items"][0]["amount_per_pc"] = None
+    up["other"]["items"] = [{"name": "杂费", "amount_per_pc": None, "note": "单据未印金额", "evidence": None}]
+    offer["tooling"]["molds"]["items"][0]["amount"] = None
+    offer["tooling"]["fixtures"]["items"][0]["amount"] = None
+    assert validate_l0_schema(envelope) == []
+
+
+def test_l0_final_unit_price_still_required_number():
+    """最终含税单价是对比基准，必须真实印出；仍保持 number（不可为 null）。"""
+    envelope = load_fixture("envelope_chuangfeng_two_offers.json")
+    envelope["offers"][0]["unit_price"]["summary"]["final_unit_price_taxed"] = None
+    issues = validate_l0_schema(envelope)
+    assert [i.issue for i in issues] == ["schema_invalid"]
+    assert "final_unit_price_taxed" in issues[0].path
 
 
 def test_l1_chuangfeng_fixture_flags_hallucinated_tax():
@@ -354,3 +412,88 @@ def test_run_validators_all_levels():
 def test_run_validators_unknown_level_raises():
     with pytest.raises(ValueError):
         run_validators({"offers": []}, _ir(), levels=("L3",))
+
+
+# ---------------------------------------------------------------------------
+# L1 溯源以 IR 为锚：脱敏材料1（编造 26.88）/ 脱敏材料3（表头噪声 镭雕）回归
+# ---------------------------------------------------------------------------
+
+def _ir_material_incident() -> IR:
+    """还原脱敏材料1/3 的真实结构：材料只有 料重/料价 两个数（无金额格），
+
+    R6 是表头噪声（"镭雕" 与 Date: 同行），R7 才是数据行（R7C17 原文 "0.40"）。
+    """
+    return IR.from_dict({
+        "source_file": "脱敏材料3.xlsx", "file_hash": "h", "file_type": "xlsx",
+        "sheets": ["page_1"], "blocks": [],
+        "tables": [
+            {"sheet": "page_1", "row_number": 6, "cells": [
+                {"row": 6, "col": 1, "value": "Date:"},
+                {"row": 6, "col": 17, "value": "镭雕"},
+            ]},
+            {"sheet": "page_1", "row_number": 7, "cells": [
+                {"row": 7, "col": 8, "value": "8"},
+                {"row": 7, "col": 9, "value": "28.5"},
+                {"row": 7, "col": 10, "value": "0.96"},
+                {"row": 7, "col": 17, "value": "0.40"},
+                {"row": 7, "col": 18, "value": "0.30"},
+            ]},
+        ],
+    })
+
+
+def test_l1_material1_raw_text_echoes_own_fabricated_amount():
+    """材料1 现场：模型把自作算术的 26.88 写回 raw_text（循环论证）→ amount_not_in_ir 抓住。"""
+    env = _envelope([_item(26.88, "材料费 26.88（28.5×0.96）", location="page_1!R7C9")])
+    issues = validate_l1_traceability(env, _ir_material_incident())
+    assert [i.issue for i in issues] == ["amount_not_in_ir"]
+    assert "不在单据任何单元格中" in issues[0].detail
+    assert issues[0].blame == "A" and issues[0].level == "error"
+
+
+def test_l1_material1_ir_serialization_leaked_into_raw_text():
+    """材料1 现场：raw_text 写成 IR 序列化片段『8:1|9:28|10:0.96』→ 原文问题 + 编造金额。"""
+    env = _envelope([_item(26.88, "8:1|9:28|10:0.96", location="page_1!R7C9")])
+    issues = validate_l1_traceability(env, _ir_material_incident())
+    assert [i.issue for i in issues] == ["raw_text_not_verbatim", "amount_not_in_ir"]
+    assert "IR 序列化片段" in issues[0].detail
+    assert issues[0].path.endswith(".evidence.raw_text")
+
+
+def test_l1_material3_header_noise_fabricated_amount():
+    """材料3 现场：表头 R6C17『镭雕』被当成数据、金额凭空写 0.75 → 报编造值。"""
+    ir = _ir_material_incident()
+    env = _envelope([_item(0.75, "镭雕", location="page_1!R7C17")])
+    issues = validate_l1_traceability(env, ir)
+    assert [i.issue for i in issues] == ["amount_not_in_evidence"]
+    assert "任何单元格中都不存在" in issues[0].detail
+    # 正确做法：照抄 R7C17 的 0.40 → 无问题
+    assert validate_l1_traceability(_envelope([_item(0.40, "0.40", location="page_1!R7C17")]), ir) == []
+
+
+def test_l1_raw_text_coordinate_only_flags_without_double_reporting():
+    """raw_text 填坐标 → 报 raw_text_not_verbatim；金额本身在单据里 → 不再报编造值。"""
+    issues = validate_l1_traceability(_envelope([_item(1.95, "page_1!R4C9")]), _ir())
+    assert [i.issue for i in issues] == ["raw_text_not_verbatim"]
+    assert "填的是坐标" in issues[0].detail
+    issues = validate_l1_traceability(_envelope([_item(1.95, "R4C9")]), _ir())
+    assert [i.issue for i in issues] == ["raw_text_not_verbatim"]
+
+
+def test_l1_raw_text_verbatim_guard_allows_pipe_and_colon_text():
+    """正常原文里的 "|" 与 "数字:" 不得误判为 IR 序列化。"""
+    env = _envelope([_item(1.95, "CNC (两夹) 1.95|全检 0.30")])
+    assert validate_l1_traceability(env, _ir()) == []
+
+
+def test_l1_evidence_consistency_warns_on_wrong_cell_text():
+    """诊断用：raw_text 与 location 单元格原文不符（且该原文在别处）→ warning，不参与重试路由。"""
+    ir = _ir_material_incident()
+    env = _envelope([_item(0.75, "镭雕", location="page_1!R7C17")])
+    warnings = validate_l1_evidence_consistency(env, ir)
+    assert [w.issue for w in warnings] == ["evidence_location_mismatch"]
+    assert warnings[0].level == "warning" and warnings[0].blame == "B"
+    assert "镭雕" in warnings[0].detail and "0.40" in warnings[0].detail
+    # 正确引用不报；且该诊断不混进 L1 重试清单
+    assert validate_l1_evidence_consistency(_envelope([_item(0.40, "0.40", location="page_1!R7C17")]), ir) == []
+    assert all(i.issue != "evidence_location_mismatch" for i in validate_l1_traceability(env, ir))

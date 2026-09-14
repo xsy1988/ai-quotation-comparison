@@ -419,3 +419,100 @@ def test_supplier_validation(seeded):
 
     resp = client.delete("/api/master/suppliers/NOPE")
     assert resp.status_code == 404
+
+
+# ---------- 抽屉（对比抽屉：比价页面「加工费专区」页签来源） ----------
+
+def test_drawers_builtin_seed_and_order(seeded):
+    body = client.get("/api/master/drawers").json()
+    assert [(d["code"], d["name"]) for d in body["drawers"]] == [
+        ("process_domain", "工艺域"),
+        ("process_stage", "工艺阶段"),
+        ("process_class", "工艺类别"),
+    ]
+    assert all(d["is_builtin"] for d in body["drawers"])
+    # 内置分组 builtin:stage:机加 归属于工艺阶段抽屉
+    assert next(d for d in body["drawers"] if d["code"] == "process_stage")["group_count"] == 1
+
+
+def test_drawer_crud(seeded):
+    resp = client.post("/api/master/drawers", json={"code": "cost_center", "name": "成本中心"})
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["code"] == "cost_center"
+    assert body["name"] == "成本中心"
+    assert body["is_builtin"] is False
+    assert body["sort_order"] == 40  # 内置 30 之后按 10 递增
+    assert body["group_count"] == 0
+
+    # 编码/名称非法
+    assert client.post("/api/master/drawers", json={"code": "Bad", "name": "x"}).status_code == 400
+    assert client.post("/api/master/drawers", json={"code": "a", "name": "x"}).status_code == 400
+    assert client.post("/api/master/drawers", json={"code": "custom", "name": "x"}).status_code == 400
+    assert client.post("/api/master/drawers", json={"code": "other", "name": " "}).status_code == 400
+    assert (
+        client.post("/api/master/drawers", json={"code": "other", "name": "成本中心"}).status_code
+        == 400
+    )
+    assert (
+        client.post("/api/master/drawers", json={"code": "cost_center", "name": "其它"}).status_code
+        == 400
+    )
+
+    # 修改
+    resp = client.patch("/api/master/drawers/cost_center", json={"name": "成本域", "sort_order": 5})
+    assert resp.status_code == 200
+    assert (resp.json()["name"], resp.json()["sort_order"]) == ("成本域", 5)
+    assert client.patch("/api/master/drawers/NOPE", json={"name": "x"}).status_code == 404
+    assert client.patch("/api/master/drawers/cost_center", json={"name": " "}).status_code == 400
+    assert client.patch("/api/master/drawers/cost_center", json={"name": "工艺域"}).status_code == 400
+
+    # 删除
+    assert client.delete("/api/master/drawers/cost_center").status_code == 200
+    assert client.delete("/api/master/drawers/cost_center").status_code == 404
+
+
+def test_drawer_builtin_protected_and_delete_guard(seeded):
+    resp = client.patch("/api/master/drawers/process_domain", json={"name": "改个名"})
+    assert resp.status_code == 400
+    assert "内置抽屉不可修改" in resp.json()["detail"]
+
+    resp = client.delete("/api/master/drawers/process_domain")
+    assert resp.status_code == 409
+    assert "内置抽屉不可删除" in resp.json()["detail"]
+
+    # 自定义抽屉下有分组 → 禁止删除
+    client.post("/api/master/drawers", json={"code": "cost_center", "name": "成本中心"})
+    resp = client.post(
+        "/api/master/dim_groups",
+        json={"group_code": "g-cost", "group_name": "成本", "scope": "cost_center",
+              "member_atoms": ["AT-TJ-001"]},
+    )
+    assert resp.status_code == 201
+    resp = client.delete("/api/master/drawers/cost_center")
+    assert resp.status_code == 409
+    assert "已有分组 1 个" in resp.json()["detail"]
+
+    # 分组转到 custom 后即可删除
+    assert (
+        client.patch("/api/master/dim_groups/g-cost", json={"scope": "custom"}).status_code == 200
+    )
+    assert client.delete("/api/master/drawers/cost_center").status_code == 200
+
+
+def test_dim_group_scope_follows_drawers(seeded):
+    """新建抽屉后其编码立即成为合法的 scope；删除抽屉后原 scope 变为非法。"""
+    client.post("/api/master/drawers", json={"code": "supplier_stage", "name": "供应商阶段"})
+    resp = client.post(
+        "/api/master/dim_groups",
+        json={"group_code": "g-s", "group_name": "阶段A", "scope": "supplier_stage"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["scope"] == "supplier_stage"
+
+    assert client.delete("/api/master/drawers/supplier_stage").status_code == 409
+
+    # scope 支持迁移，且必须是合法抽屉编码
+    resp = client.patch("/api/master/dim_groups/g-s", json={"scope": "bogus"})
+    assert resp.status_code == 400
+    assert "scope 非法" in resp.json()["detail"]

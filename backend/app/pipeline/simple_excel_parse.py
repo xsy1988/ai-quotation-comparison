@@ -273,7 +273,7 @@ def parse_ir(ir: IR | dict, supplier_name: str | None = None) -> dict:
     # 勾稽字段按规则计算：untaxed=Σ模块合计（排除税费），taxed=untaxed+税额，final=taxed−折扣
     tax_amount = round(
         sum(
-            item["amount_per_pc"]
+            item["amount_per_pc"] or 0
             for item in modules["sga_tax"]["items"]
             if item.get("item_type") == "税费"
         ),
@@ -298,7 +298,7 @@ def parse_ir(ir: IR | dict, supplier_name: str | None = None) -> dict:
         for key in ("molds", "fixtures", "stencils"):
             sub = tooling[key]
             if sub["total"] is None and sub["items"]:
-                sub["total"] = round(sum(i["amount"] for i in sub["items"]), 6)
+                sub["total"] = round(sum(i["amount"] or 0 for i in sub["items"]), 6)
 
     return {
         "schema_version": "1.1",

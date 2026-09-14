@@ -1,13 +1,7 @@
 import { Empty, Table, Tabs } from 'antd'
-import type { Comparison, DrawerScope } from '../types'
+import type { Comparison } from '../types'
 import Amount from './Amount'
 import { lookupValue } from './compareUtils'
-
-const SCOPE_LABELS: Record<DrawerScope, string> = {
-  process_domain: '按工艺域',
-  process_stage: '按工艺阶段',
-  process_class: '按工艺类别',
-}
 
 interface Props {
   comparison: Comparison
@@ -24,7 +18,7 @@ export default function DrawerTabs({ comparison }: Props) {
     <Tabs
       items={drawers.map((drawer) => ({
         key: drawer.scope,
-        label: SCOPE_LABELS[drawer.scope] ?? drawer.scope,
+        label: drawer.name || drawer.scope,
         children: (
           <Table
             size="small"

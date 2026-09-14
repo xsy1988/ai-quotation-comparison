@@ -108,7 +108,8 @@ export interface PriceTreeNode {
   } | null
 }
 
-export type DrawerScope = 'process_domain' | 'process_stage' | 'process_class'
+/** 抽屉编码：内置 3 个（process_domain/process_stage/process_class）+ 自定义，故为自由字符串 */
+export type DrawerScope = string
 
 export interface DrawerGroup {
   group_code: string
@@ -120,6 +121,8 @@ export interface DrawerGroup {
 
 export interface Drawer {
   scope: DrawerScope
+  /** 抽屉名称（来自 drawer 表，后端随比价结果下发） */
+  name: string
   groups: DrawerGroup[]
 }
 
@@ -205,25 +208,155 @@ export interface CreateTaskResponse {
   task_id: number
 }
 
-// ---------- AI 综合建议 ----------
+// ---------- AI 分析 ----------
 
-export interface AiSummary {
+/** 优势/劣势/风险的固定子维度名（与后端 ai_analysis 模块一致，前端只做渲染） */
+export interface AiAnalysisDimensions {
+  advantage: string[]
+  weakness: string[]
+  risk: string[]
+}
+
+export interface AiAnalysisSupplier {
+  quote_id: number
+  name: string
+  part_name: string | null
+  scheme: string | null
+  /** 含税单价升序排名（1 = 最低），取机械对比结果 */
+  price_rank: number
+  is_lowest: boolean
+  final_unit_price_taxed: number | null
+  /** 一级维度：≤25 字 */
+  advantage: string
+  weakness: string
+  risk: string
+  suggestion: string
+  /** 子维度：维度名 -> 单元格文本（≤40 字），维度名固定且顺序固定 */
+  advantage_detail: Record<string, string>
+  weakness_detail: Record<string, string>
+  risk_detail: Record<string, string>
+}
+
+export interface AiAnalysisContent {
+  unit: string
+  category: string | null
+  category_name: string | null
+  part: Record<string, string | number | null>
+  /** ≤100 字专家总评 */
+  overall: string
+  suppliers: AiAnalysisSupplier[]
+  dimensions: AiAnalysisDimensions
+}
+
+export interface AiAnalysis {
   id: number
   task_id: number
-  content: string
+  /** 输入指纹（结构化输入 + prompt 版本），变了才需要重新分析 */
+  signature: string
+  status: 'running' | 'completed' | 'failed'
+  content: AiAnalysisContent | null
   /** pass = 数字回检通过；mismatch = 部分数字与机械对比不一致 */
-  check_status: 'pass' | 'mismatch'
-  /** JSON：数字回检明细（回检轮次、抽查数、可疑数列表） */
+  check_status: 'pass' | 'mismatch' | null
   check_detail: {
     rounds: number
     checked: number
     suspicious: { value: number }[]
+    structure_errors?: string[]
+    missing_quote_ids?: number[]
   } | null
+  error: string | null
+  model: string | null
+  tokens: number | null
+  elapsed_ms: number | null
+  created_at: string
+  updated_at: string
+}
+
+export interface AiAnalysisResponse {
+  signature: string | null
+  analysis: AiAnalysis | null
+  /** 已有分析结果的指纹与当前输入不一致（数据已更新，可重新分析） */
+  stale: boolean
+  /** 当前指纹下无任何分析记录 → 前端进入页面时自动触发一次 */
+  auto_run: boolean
+  in_progress: boolean
+}
+
+// ---------- 报价单数据 ----------
+
+export interface QuoteListItem {
+  quote_id: number
+  task_id: number
+  project_name: string | null
+  supplier_name: string
+  part_name: string | null
+  category_code: string | null
+  category_name: string | null
+  final_unit_price_taxed: number | null
+  tooling_total: number | null
+  calc_check: string | null
+  flags: string[]
+  parse_status: string
+  line_count: number
+  has_other_info: boolean
   created_at: string
 }
 
-export interface AiSummaryResponse {
-  summary: AiSummary | null
+export interface QuoteLine {
+  id: number
+  module: string
+  item_name: string | null
+  item_type: string | null
+  amount: number | null
+  unit: string | null
+  rate: number | null
+  atom_code: string | null
+  atom_name: string | null
+  is_new_process: boolean
+  bundle_flag: boolean
+  candidate_atoms: string[]
+  fingerprint: string | null
+  confidence: number | null
+  match_path: string | null
+  cross_check: { diff?: number; verdict?: string } | null
+  confirm_status: string | null
+  note: string | null
+  evidence: Record<string, unknown> | null
+}
+
+export interface QuoteToolingLine {
+  tooling_type: ToolingType
+  type_name: string
+  item_name: string | null
+  amount: number | null
+  cavity_count: number | null
+  lifespan: number | null
+  note: string | null
+}
+
+export interface QuoteDetail {
+  quote_id: number
+  task_id: number
+  project_name: string | null
+  supplier_name: string
+  supplier_code: string | null
+  category_code: string | null
+  basic: Record<string, unknown>
+  parse_status: string
+  calc_check: string | null
+  flags: string[]
+  modules: { module: string; name: string; total: number | null }[]
+  summary: {
+    untaxed_total: number | null
+    tax_amount: number | null
+    discount: number | null
+    final_unit_price_taxed: number | null
+    tooling_total: number | null
+  }
+  lines: QuoteLine[]
+  tooling: QuoteToolingLine[]
+  /** 解析时额外识别到的信息（markdown，已剔除手机号/姓名/邮箱/印章等个人信息与银行开户信息） */
+  other_info: string | null
 }
 
 // ---------- 就地编辑（第 7 步） ----------
@@ -343,7 +476,8 @@ export interface MasterCategory {
   updated_at: string
 }
 
-export type DimGroupScope = 'process_domain' | 'process_stage' | 'process_class' | 'custom'
+/** 分组所属维度 = 抽屉编码（自由字符串，含保留值 custom=自定义），由 drawer 表驱动 */
+export type DimGroupScope = string
 
 export interface MasterDimGroup {
   group_code: string
@@ -354,6 +488,18 @@ export interface MasterDimGroup {
   member_atoms: string[]
   member_count: number
   is_builtin: boolean
+  created_at: string
+  updated_at: string
+}
+
+/** 对比抽屉（比价页面「加工费专区」的页签；内置 3 个不可改不可删） */
+export interface MasterDrawer {
+  code: string
+  name: string
+  is_builtin: boolean
+  sort_order: number
+  /** 该抽屉下已有的分组数（删除保护用） */
+  group_count: number
   created_at: string
   updated_at: string
 }

@@ -12,6 +12,9 @@ import CreatePage from './pages/CreatePage'
 import ProgressPage from './pages/ProgressPage'
 import ComparisonPage from './pages/ComparisonPage'
 import MasterPage from './pages/MasterPage'
+import TaskHistoryPage from './pages/TaskHistoryPage'
+import QuoteListPage from './pages/QuoteListPage'
+import QuoteDetailPage from './pages/QuoteDetailPage'
 
 dayjs.locale('zh-cn')
 
@@ -54,9 +57,18 @@ export default function Main() {
           <Routes>
             <Route path="/" element={<App />}>
               <Route index element={<CreatePage />} />
-              <Route path="master" element={<MasterPage />} />
+              <Route path="tasks" element={<TaskHistoryPage />} />
               <Route path="tasks/:id/progress" element={<ProgressPage />} />
               <Route path="tasks/:id/comparison" element={<ComparisonPage />} />
+              <Route path="quotes" element={<QuoteListPage />} />
+              <Route path="quotes/:id" element={<QuoteDetailPage />} />
+              <Route path="suppliers" element={<MasterPage section="suppliers" />} />
+              <Route path="master" element={<Navigate to="/master/atoms" replace />} />
+              <Route path="master/atoms" element={<MasterPage section="atoms" />} />
+              <Route path="master/aliases" element={<MasterPage section="aliases" />} />
+              <Route path="master/categories" element={<MasterPage section="categories" />} />
+              <Route path="master/drawers" element={<MasterPage section="drawers" />} />
+              <Route path="master/dim-groups" element={<MasterPage section="dim-groups" />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Routes>

@@ -65,11 +65,16 @@ def items_sum(module: dict) -> float:
 
 
 def module_total(module: dict) -> float | None:
-    """模块合计取值优先级：total 字段 > Σitems；两者皆空返回 None。"""
+    """模块合计取值优先级：total 字段 > Σitems；两者皆空返回 None。
+
+    明细金额全部未印出（null）时没有任何已知项可累加，返回 None 而非 0.0——null 不得以 0 占位。
+    """
     if module.get("total") is not None:
         return round(float(module["total"]), 6)
     items = module.get("items") or []
-    return items_sum(module) if items else None
+    if not items or all(item.get("amount_per_pc") is None for item in items):
+        return None
+    return items_sum(module)
 
 
 def _within_tolerance(actual: float | None, expected: float) -> bool:

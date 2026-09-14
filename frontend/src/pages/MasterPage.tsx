@@ -9,9 +9,9 @@ import {
   Select,
   Space,
   Table,
-  Tabs,
   Tag,
   Transfer,
+  Typography,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -20,11 +20,13 @@ import {
   createMasterAtom,
   createMasterCategory,
   createMasterDimGroup,
+  createMasterDrawer,
   createMasterSupplier,
   deleteMasterAlias,
   deleteMasterAtom,
   deleteMasterCategory,
   deleteMasterDimGroup,
+  deleteMasterDrawer,
   deleteMasterSupplier,
   errorDetail,
   getAtoms,
@@ -36,27 +38,25 @@ import {
   listMasterAtoms,
   listMasterCategories,
   listMasterDimGroups,
+  listMasterDrawers,
   listMasterSuppliers,
   patchMasterAtom,
   patchMasterCategory,
   patchMasterDimGroup,
+  patchMasterDrawer,
   patchMasterSupplier,
 } from '../api/client'
 import type {
-  DimGroupScope,
   MasterAlias,
   MasterAtom,
   MasterCategory,
   MasterDimGroup,
+  MasterDrawer,
   MasterSupplier,
 } from '../types'
 
-const SCOPE_LABELS: Record<DimGroupScope, string> = {
-  process_domain: '工艺域',
-  process_stage: '工艺阶段',
-  process_class: '工艺类别',
-  custom: '自定义',
-}
+/** 分组「维度」= 抽屉编码；custom 为保留值（不属于任何抽屉，即自定义分组） */
+const CUSTOM_SCOPE = 'custom'
 
 const ALIAS_SOURCE_LABELS: Record<MasterAlias['source'], string> = {
   initial: '初始导入',
@@ -64,19 +64,47 @@ const ALIAS_SOURCE_LABELS: Record<MasterAlias['source'], string> = {
   new_process: '新工艺回流',
 }
 
-export default function MasterPage() {
-  return (
-    <Tabs
-      defaultActiveKey="atoms"
-      items={[
-        { key: 'atoms', label: '原子', children: <AtomTab /> },
-        { key: 'aliases', label: '别名', children: <AliasTab /> },
-        { key: 'categories', label: '品类', children: <CategoryTab /> },
-        { key: 'dim_groups', label: '抽屉分组', children: <DimGroupTab /> },
-        { key: 'suppliers', label: '供应商', children: <SupplierTab /> },
-      ]}
-    />
-  )
+export type MasterSection =
+  | 'atoms'
+  | 'aliases'
+  | 'categories'
+  | 'drawers'
+  | 'dim-groups'
+  | 'suppliers'
+
+export default function MasterPage({ section }: { section: MasterSection }) {
+  switch (section) {
+    case 'atoms':
+      return <AtomTab />
+    case 'aliases':
+      return <AliasTab />
+    case 'categories':
+      return <CategoryTab />
+    case 'drawers':
+      return <DrawerTab />
+    case 'dim-groups':
+      return <DimGroupTab />
+    case 'suppliers':
+      return <SupplierTab />
+  }
+}
+
+/** 抽屉编码 -> 展示名（分组表的「维度」列、新增分组下拉共用） */
+function useDrawerScopes() {
+  const { data } = useQuery({
+    queryKey: ['master', 'drawers'],
+    queryFn: listMasterDrawers,
+  })
+  const drawers = useMemo(() => data ?? [], [data])
+  const labelOf = (scope: string) =>
+    scope === CUSTOM_SCOPE
+      ? '自定义'
+      : (drawers.find((d) => d.code === scope)?.name ?? scope)
+  const options = [
+    ...drawers.map((d) => ({ value: d.code, label: d.name })),
+    { value: CUSTOM_SCOPE, label: '自定义' },
+  ]
+  return { drawers, labelOf, options }
 }
 
 // ---------- 通用 ----------
@@ -648,6 +676,7 @@ function DimGroupTab() {
   const { message } = App.useApp()
   const queryClient = useQueryClient()
   const showError = useShowError()
+  const { labelOf, options: scopeOptions } = useDrawerScopes()
   const [addOpen, setAddOpen] = useState(false)
   const [editing, setEditing] = useState<MasterDimGroup | null>(null)
   const [memberEditing, setMemberEditing] = useState<MasterDimGroup | null>(null)
@@ -757,8 +786,8 @@ function DimGroupTab() {
     {
       title: '维度',
       dataIndex: ['group', 'scope'],
-      width: 100,
-      render: (v: DimGroupScope) => <Tag>{SCOPE_LABELS[v] ?? v}</Tag>,
+      width: 120,
+      render: (v: string) => <Tag>{labelOf(v)}</Tag>,
     },
     {
       title: '父分组',
@@ -858,13 +887,14 @@ function DimGroupTab() {
           <Form.Item name="group_name" label="分组名称" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
-          <Form.Item name="scope" label="维度" rules={[{ required: true }]} initialValue="custom">
-            <Select
-              options={(Object.keys(SCOPE_LABELS) as DimGroupScope[]).map((s) => ({
-                value: s,
-                label: SCOPE_LABELS[s],
-              }))}
-            />
+          <Form.Item
+            name="scope"
+            label="维度（抽屉）"
+            rules={[{ required: true }]}
+            initialValue={CUSTOM_SCOPE}
+            extra="选择所属抽屉；自定义表示不参与比价页面的抽屉页签"
+          >
+            <Select options={scopeOptions} />
           </Form.Item>
           <Form.Item name="parent_code" label="父分组">
             <Select allowClear options={groupOptions()} placeholder="不选则为顶层分组" />
@@ -948,6 +978,210 @@ function MemberPicker({
   options: TransferRecord[]
 }) {
   return <MemberTransfer dataSource={options} targetKeys={value ?? []} onChange={onChange ?? (() => {})} />
+}
+
+// ---------- 抽屉管理 ----------
+
+/** 抽屉 = 比价页面「加工费专区」的一个页签，由 dim_group.scope 关联分组；
+ *  内置 3 个（工艺域/工艺阶段/工艺类别）不可修改或删除。 */
+function DrawerTab() {
+  const { message } = App.useApp()
+  const queryClient = useQueryClient()
+  const showError = useShowError()
+  const [addOpen, setAddOpen] = useState(false)
+  const [editing, setEditing] = useState<MasterDrawer | null>(null)
+  const [addForm] = Form.useForm()
+  const [editForm] = Form.useForm()
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['master', 'drawers'],
+    queryFn: listMasterDrawers,
+  })
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ['master', 'drawers'] })
+    // 抽屉集合变化会影响分组的维度下拉
+    void queryClient.invalidateQueries({ queryKey: ['comparison'] })
+  }
+
+  const createMut = useMutation({
+    mutationFn: createMasterDrawer,
+    onSuccess: () => {
+      message.success('抽屉已创建')
+      setAddOpen(false)
+      addForm.resetFields()
+      invalidate()
+    },
+    onError: (e) => showError(e, '创建抽屉'),
+  })
+  const patchMut = useMutation({
+    mutationFn: ({
+      code,
+      patch,
+    }: {
+      code: string
+      patch: { name?: string; sort_order?: number }
+    }) => patchMasterDrawer(code, patch),
+    onSuccess: () => {
+      message.success('抽屉已更新')
+      setEditing(null)
+      invalidate()
+    },
+    onError: (e) => showError(e, '更新抽屉'),
+  })
+  const deleteMut = useMutation({
+    mutationFn: deleteMasterDrawer,
+    onSuccess: () => {
+      message.success('抽屉已删除')
+      invalidate()
+    },
+    onError: (e) => showError(e, '删除抽屉'),
+  })
+
+  const columns: ColumnsType<MasterDrawer> = [
+    {
+      title: '抽屉名称',
+      dataIndex: 'name',
+      render: (name: string, record) => (
+        <Space size={4}>
+          <span>{name}</span>
+          {record.is_builtin && <Tag color="blue">内置</Tag>}
+        </Space>
+      ),
+    },
+    { title: '编码', dataIndex: 'code', width: 180 },
+    { title: '排序', dataIndex: 'sort_order', width: 80 },
+    {
+      title: '分组数',
+      dataIndex: 'group_count',
+      width: 90,
+      render: (count: number) => (count > 0 ? count : '—'),
+    },
+    { title: '创建时间', dataIndex: 'created_at', width: 160 },
+    {
+      title: '操作',
+      width: 140,
+      render: (_, record) =>
+        record.is_builtin ? (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            内置抽屉不可修改
+          </Typography.Text>
+        ) : (
+          <Space>
+            <Button
+              size="small"
+              onClick={() => {
+                setEditing(record)
+                editForm.setFieldsValue({ name: record.name, sort_order: record.sort_order })
+              }}
+            >
+              编辑
+            </Button>
+            <Popconfirm
+              title="删除该抽屉？"
+              description="抽屉下存在分组时将被拒绝，需先把分组迁移到其它抽屉"
+              onConfirm={() => deleteMut.mutate(record.code)}
+            >
+              <Button size="small" danger>
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        ),
+    },
+  ]
+
+  return (
+    <Space direction="vertical" style={{ width: '100%' }}>
+      <Space>
+        <Button type="primary" onClick={() => setAddOpen(true)}>
+          新增抽屉
+        </Button>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          抽屉决定比价页面「加工费专区」的页签；工艺域、工艺阶段、工艺类别为内置抽屉，不可修改或删除
+        </Typography.Text>
+      </Space>
+      <Table<MasterDrawer>
+        rowKey="code"
+        size="small"
+        loading={isLoading}
+        columns={columns}
+        dataSource={data ?? []}
+        pagination={false}
+      />
+
+      <Modal
+        title="新增抽屉"
+        open={addOpen}
+        onCancel={() => setAddOpen(false)}
+        onOk={() => addForm.submit()}
+        confirmLoading={createMut.isPending}
+        destroyOnClose
+      >
+        <Form
+          form={addForm}
+          layout="vertical"
+          onFinish={(values) =>
+            createMut.mutate({
+              code: values.code.trim(),
+              name: values.name.trim(),
+              sort_order: values.sort_order ?? undefined,
+            })
+          }
+        >
+          <Form.Item
+            name="code"
+            label="抽屉编码"
+            rules={[{ required: true }]}
+            extra="小写字母开头的小写字母/数字/下划线组合（2-32 位），创建后不可修改"
+          >
+            <Input placeholder="如 cost_center" />
+          </Form.Item>
+          <Form.Item name="name" label="抽屉名称" rules={[{ required: true }]}>
+            <Input placeholder="如 成本中心" />
+          </Form.Item>
+          <Form.Item name="sort_order" label="排序" extra="留空则排在最后">
+            <Input type="number" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={`编辑抽屉 ${editing?.code ?? ''}`}
+        open={editing !== null}
+        onCancel={() => setEditing(null)}
+        onOk={() => editForm.submit()}
+        confirmLoading={patchMut.isPending}
+        destroyOnClose
+      >
+        <Form
+          form={editForm}
+          layout="vertical"
+          onFinish={(values) => {
+            if (editing) {
+              patchMut.mutate({
+                code: editing.code,
+                patch: {
+                  name: values.name.trim(),
+                  sort_order:
+                    values.sort_order === undefined || values.sort_order === null
+                      ? undefined
+                      : Number(values.sort_order),
+                },
+              })
+            }
+          }}
+        >
+          <Form.Item name="name" label="抽屉名称" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="sort_order" label="排序">
+            <Input type="number" />
+          </Form.Item>
+        </Form>
+      </Modal>
+    </Space>
+  )
 }
 
 // ---------- 供应商 ----------

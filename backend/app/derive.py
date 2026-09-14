@@ -63,8 +63,22 @@ _TEXT_BEARING_RE = re.compile(r"[A-Za-z一-鿿]")
 
 
 def _items_sum(items: list[dict]) -> float:
-    """明细之和（去重后口径）：bundle_flag=true 的行整行计入，不拆分；amount 为 null 视 0。"""
+    """明细之和（去重后口径）：bundle_flag=true 的行整行计入，不拆分；amount 为 null 视 0。
+
+    null 表示「单据未印出该金额」，此时合计只是下限（见 _missing_amount_count：
+    这类模块会记 amount_missing 冲突，不静默当成完整合计）。
+    """
     return round(sum(float(item.get("amount_per_pc") or 0) for item in items), 6)
+
+
+def _missing_amount_count(module_name: str, items: list[dict]) -> int:
+    """金额未印出（null）的明细数；税费条目允许 null（由脚本按税率×未税派生），不计入。"""
+    return sum(
+        1
+        for item in items
+        if item.get("amount_per_pc") is None
+        and not (module_name == "sga_tax" and item.get("item_type") == TAX_ITEM_TYPE)
+    )
 
 
 def _tolerance(expected: float) -> float:
@@ -227,12 +241,20 @@ def _fix_module_totals(offer: dict, derived: dict, conflicts: list[dict],
     filled = derived.setdefault("filled_module_totals", [])
     corrected = derived.setdefault("corrected_module_totals", {})
     provenance = derived.setdefault("provenance_totals", {})
+    # 金额未印出（null）的模块：合计只能算下限，记成冲突并持久化（重放保证双跑一致）
+    missing_amounts = derived.setdefault("modules_with_missing_amounts", {})
     for name in MODULES:
         module = up.get(name) or {}
         items = module.get("items") or []
         total = module.get("total")
+        if items:
+            missing = _missing_amount_count(name, items)
+            if missing:
+                missing_amounts[name] = missing
         if total is None:
-            if items:
+            # 全明细金额都未印出（null）时 Σitems 恒为 0、没有任何已知项，写回就是拿 0 占位
+            # （v1.4 null 纪律），此时保持 null；只要有已知项，按已知项之和作下限回填。
+            if items and any(item.get("amount_per_pc") is not None for item in items):
                 module["total"] = _items_sum(items)
                 if name not in filled:
                     filled.append(name)
@@ -302,6 +324,25 @@ def _fix_module_totals(offer: dict, derived: dict, conflicts: list[dict],
                     "detail": f"{name} total={total} 与 Σitems={items_sum} 不符，保留单据值",
                 }
             )
+    for name, count in missing_amounts.items():
+        # 幂等重放（与 corrected/provenance 同思路）：每轮都从持久化的记录里重放冲突
+        module = up.get(name) or {}
+        total = module.get("total")
+        lower_bound = (
+            f"合计 {total} 只是下限"
+            if total is not None
+            else "明细金额全部未印出，无可信合计（保持 null）"
+        )
+        conflicts.append(
+            {
+                "kind": "amount_missing",
+                "module": name,
+                "document_value": None,
+                "derived_value": total,
+                "detail": f"{name} 有 {count} 项明细金额单据未印出（null，Σitems 按 0 计入），"
+                          f"{lower_bound}",
+            }
+        )
 
 
 def _resolve_tax(offer: dict, derived: dict, conflicts: list[dict], untaxed: float) -> float | None:

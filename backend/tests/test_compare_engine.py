@@ -696,3 +696,27 @@ def test_empty_task_comparison(tmp_path, monkeypatch):
     assert result["fingerprint_groups"] == []
     conn.close()
 
+
+
+def test_custom_drawer_becomes_comparison_tab(comparison):
+    """抽屉表新增自定义抽屉 + 该 scope 下建分组 → 比价结果里多出一个页签（名称取抽屉名）。"""
+    conn, task_id, qa, qb, result = comparison
+    db = get_connection()
+    with db:
+        db.execute("INSERT INTO drawer (code, name, sort_order) VALUES ('cost_center', '成本中心', 40)")
+        db.execute(
+            """INSERT INTO dim_group (group_code, group_name, scope, member_atoms)
+               VALUES ('g-cost', '切削', 'cost_center', '["AT-QX-001"]')"""
+        )
+    fresh = get_comparison(db, task_id)
+    db.close()
+
+    assert [d["scope"] for d in fresh["drawers"]] == [
+        "process_domain", "process_stage", "process_class", "cost_center",
+    ]
+    assert [d["name"] for d in fresh["drawers"]][-1] == "成本中心"
+    custom = fresh["drawers"][-1]
+    bucket = next(g for g in custom["groups"] if g["group_code"] == "g-cost")
+    assert bucket["values"] == {qa: 2.0, qb: 1.8}
+    # 兜底桶仍在，保证未归类金额不丢
+    assert custom["groups"][-1]["group_code"] == "unmatched"

@@ -10,8 +10,10 @@ import pytest
 
 from app.db import get_connection, init_db
 from app.ingest import excel_to_ir, sha256_of
+from app.ir import CellValue
 from app.llm.client import LLMError, LLMUnavailable
 import app.persist as persist_module
+import app.pipeline.layout_understand as layout_module
 from app.persist import persist_quote
 from app.pipeline.layout_understand import (
     LLMValidateError,
@@ -60,10 +62,10 @@ def valid_quote(category="CAT-WJWK") -> dict:
     return envelope(valid_offer(category))
 
 
-def invalid_quote() -> dict:
+def invalid_quote(bad_currency="RMB") -> dict:
     """currency 违反枚举，必触发 Draft7 校验错误。"""
     data = valid_offer()
-    data["basic"]["currency"] = "RMB"
+    data["basic"]["currency"] = bad_currency
     return envelope(data)
 
 
@@ -125,13 +127,16 @@ def test_self_check_absent_archived_null():
 
 
 def test_parse_llm_persistent_invalid_raises_unavailable():
-    fake = FakeChat(invalid_quote(), invalid_quote(), invalid_quote())
+    # 3 轮各不相同（避免触发"输出与上一轮一致"的提前终止），但都 schema 非法
+    fake = FakeChat(invalid_quote("RMB"), invalid_quote("RMBX"), invalid_quote("RMBXX"))
     with pytest.raises(LLMUnavailable) as exc_info:
         parse_ir_with_llm(load_ir(), chat_fn=fake)
     assert len(fake.calls) == 3  # 上限 3 轮（含首轮）
     attempts = exc_info.value.attempts
     assert len(attempts) == 3
     assert attempts[2]["validation_errors"]
+    assert all(a["kind"] == "schema_invalid" for a in attempts)  # 每轮失败类型入档
+    assert "各轮情况" in str(exc_info.value)  # 异常消息带逐轮摘要，便于排查
 
 
 def test_parse_llm_gateway_unavailable_no_retry():
@@ -145,10 +150,10 @@ def test_parse_llm_gateway_unavailable_no_retry():
 # 3 轮重试闭环：L1 溯源反馈（traceability）、L2 只记录不打断
 # ---------------------------------------------------------------------------
 
-def _hallucinated_amount_quote() -> dict:
+def _hallucinated_amount_quote(amount: float = 9.99) -> dict:
     """金额被改成 raw_text 中不存在的值（schema 合法的内容幻觉）。"""
     quote = valid_quote()
-    quote["offers"][0]["unit_price"]["processing"]["items"][0]["amount_per_pc"] = 9.99  # 原文 'CNC加工 2'
+    quote["offers"][0]["unit_price"]["processing"]["items"][0]["amount_per_pc"] = amount  # 原文 'CNC加工 2'
     return quote
 
 
@@ -169,15 +174,60 @@ def test_parse_llm_l1_hallucination_retry_then_success():
 
 
 def test_parse_llm_l1_persistent_hallucination_raises_after_3_rounds():
-    """3 轮都不改幻觉金额 → LLMValidateError，attempts 长度 3，异常带最终问题清单。"""
-    fake = FakeChat(_hallucinated_amount_quote(), _hallucinated_amount_quote(), _hallucinated_amount_quote())
+    """3 轮改成各不相同的幻觉金额 → 用满 3 轮，attempts 长度 3，异常带最终问题清单。"""
+    fake = FakeChat(
+        _hallucinated_amount_quote(9.99),
+        _hallucinated_amount_quote(8.88),
+        _hallucinated_amount_quote(7.77),
+    )
     with pytest.raises(LLMValidateError) as exc_info:
         parse_ir_with_llm(load_ir(), chat_fn=fake)
     assert len(fake.calls) == 3
     attempts = exc_info.value.attempts
     assert len(attempts) == 3
-    assert all(a["l1_issues"] for a in attempts)  # 每轮 L1 都报同一幻觉
-    assert "9.99" in str(exc_info.value)  # 异常消息带最终问题清单
+    assert all(a["l1_issues"] for a in attempts)  # 每轮 L1 都报幻觉
+    assert all(a["kind"] == "traceability" for a in attempts)
+    assert "7.77" in str(exc_info.value)  # 异常消息带最终问题清单
+
+
+def test_parse_llm_identical_output_fails_fast():
+    """连续两轮输出完全一致（模型对 retry 反馈零响应）→ 提前终止，不再空烧第 3 轮。"""
+    fake = FakeChat(_hallucinated_amount_quote(), _hallucinated_amount_quote())
+    with pytest.raises(LLMValidateError) as exc_info:
+        parse_ir_with_llm(load_ir(), chat_fn=fake)
+    assert len(fake.calls) == 2  # 第 3 轮被跳过
+    assert len(exc_info.value.attempts) == 2
+    assert "无进展" in str(exc_info.value)  # 终止原因写进异常消息
+
+
+def test_l1_issues_recorded_even_when_schema_invalid():
+    """L0 报错时 L1 仍要算并入档：schema 错误会掩盖编造金额这一真正的首因。"""
+    quote = _hallucinated_amount_quote()
+    quote["offers"][0]["basic"]["currency"] = "RMB"  # 同时 schema 非法
+    fake = FakeChat(quote, valid_quote())
+    _data, attempts, _cross = parse_ir_with_llm_traced(load_ir(), chat_fn=fake)
+    assert attempts[0]["validation_errors"]  # L0 问题仍在
+    assert attempts[0]["l1_issues"][0]["issue"] == "amount_not_in_evidence"  # L1 也入档
+    assert attempts[0]["kind"] == "schema_invalid"  # 路由优先级不变
+    assert "currency" in fake.calls[1][-1]["content"]
+
+
+def test_llm_trace_archived_per_round(tmp_path, monkeypatch):
+    """每轮原始输出 + 校验结果落盘 llm_trace/{file_hash}_r{n}.json，失败轮也留痕。"""
+    monkeypatch.setattr(layout_module, "LLM_TRACE_DIR", tmp_path / "trace")
+    fake = FakeChat(_hallucinated_amount_quote(), valid_quote())
+    parse_ir_with_llm_traced(load_ir(), chat_fn=fake)
+    files = sorted(p.name for p in (tmp_path / "trace").iterdir())
+    assert len(files) == 2  # 失败轮与成功轮都落盘
+    first = json.loads((tmp_path / "trace" / files[0]).read_text(encoding="utf-8"))
+    assert first["attempt"]["round"] == 1
+    assert first["attempt"]["l1_issues"][0]["issue"] == "amount_not_in_evidence"
+    # 落盘的是模型原始输出（未剥离 _derived 的解析结果）
+    assert first["output"]["offers"][0]["unit_price"]["processing"]["items"][0]["amount_per_pc"] == 9.99
+    # LLM_TRACE=0 时完全不写盘
+    monkeypatch.setenv("LLM_TRACE", "0")
+    parse_ir_with_llm(load_ir(), chat_fn=FakeChat(valid_quote()))
+    assert len(list((tmp_path / "trace").iterdir())) == 2
 
 
 def test_parse_llm_json_unparseable_retries_up_to_3():
@@ -190,7 +240,7 @@ def test_parse_llm_json_unparseable_retries_up_to_3():
     assert all(a["validation_errors"] == ["bad json"] for a in exc_info.value.attempts)
     # 每轮反馈均为 json_unparseable 模板
     for call in fake.calls[1:]:
-        assert "上次输出有误" in call[-1]["content"]
+        assert "上次输出无法解析" in call[-1]["content"]
 
 
 def test_parse_llm_l2_issues_recorded_not_blocking():
@@ -324,3 +374,39 @@ def test_pipeline_llm_success_path(prepared, monkeypatch):
     # 样例报价单税额 0.51 与 13%×未税(1.30) 不符：单据值保留，derive 打标（新规则，单据优先不改值）
     assert json.loads(quote["flags"]) == ["cross_validation_conflict"]
     conn.close()
+
+
+def test_cross_check_tolerates_separator_only_cell():
+    """IR 里的纯分隔符噪声单元格（如 "，"）不能被当成金额：曾抛
+    ValueError: could not convert string to float: '' 让整个文件解析失败。"""
+    ir = load_ir()
+    ir.tables[0].cells.append(CellValue(row=0, col=99, value="，"))
+    ir.tables[0].cells.append(CellValue(row=0, col=98, value="￥"))
+    cross = cross_check(ir, valid_quote())  # 不再抛异常
+    assert cross["item_conflicts"] == 0
+
+
+def test_parse_llm_succeeds_when_diagnostics_crash(monkeypatch):
+    """后置诊断（脚本侧对账 / L2 勾稽）异常只记录、不让已通过 L0+L1 的解析失败。"""
+    def boom(*_args, **_kwargs):
+        raise ValueError("could not convert string to float: ''")
+
+    monkeypatch.setattr(layout_module, "cross_check", boom)
+    data, attempts, cross = parse_ir_with_llm_traced(
+        load_ir(), chat_fn=FakeChat(valid_quote("CAT-WJWK"))
+    )
+    assert data["offers"]  # 解析结果照常返回
+    assert "could not convert" in attempts[-1]["diagnostic_error"]
+    assert "could not convert" in cross["diagnostic_error"]
+
+
+def test_parse_llm_records_diagnostic_error_for_l2(monkeypatch):
+    monkeypatch.setattr(
+        layout_module, "validate_l2_reconcile",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("l2 boom")),
+    )
+    _data, attempts, cross = parse_ir_with_llm_traced(
+        load_ir(), chat_fn=FakeChat(valid_quote("CAT-WJWK"))
+    )
+    assert attempts[-1]["diagnostic_error"] == "RuntimeError: l2 boom"
+    assert cross["diagnostic_error"] == "RuntimeError: l2 boom"

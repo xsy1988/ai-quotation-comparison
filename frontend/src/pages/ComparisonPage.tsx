@@ -7,7 +7,7 @@ import type { Comparison, Supplier, WarningCategory } from '../types'
 import HierarchyTable from '../components/HierarchyTable'
 import DrawerTabs from '../components/DrawerTabs'
 import FingerprintTable from '../components/FingerprintTable'
-import AiSummarySection from '../components/AiSummarySection'
+import AiAnalysisSection from '../components/AiAnalysisSection'
 import NewProcessCard from '../components/NewProcessCard'
 import { calcAbnormalSuppliers, warningSuppliers } from '../components/compareUtils'
 import SupplierCategorySelect from '../components/SupplierCategorySelect'
@@ -70,6 +70,9 @@ export default function ComparisonPage() {
     return new Set((def?.suppliers(data) ?? []).map((s) => s.quote_id))
   }, [data, activeBadge])
 
+  // 供应商列顺序的唯一来源：比价表格（「报价对比」模块）的列顺序，AI 分析模块必须与之一致
+  const supplierOrder = useMemo(() => data?.suppliers.map((s) => s.quote_id), [data])
+
   if (!Number.isFinite(taskId)) {
     return <Alert type="error" message="无效的任务 ID" showIcon />
   }
@@ -107,6 +110,8 @@ export default function ComparisonPage() {
         </Card>
       ) : (
         <>
+          <AiAnalysisSection taskId={taskId} supplierOrder={supplierOrder} />
+
           <Card title="报价单对比">
             {data.price_tree.length === 0 ? (
               <Empty />
@@ -185,8 +190,6 @@ export default function ComparisonPage() {
               <FingerprintTable comparison={data} />
             )}
           </Card>
-
-          <AiSummarySection taskId={taskId} />
 
           <NewProcessCard taskId={taskId} />
         </>

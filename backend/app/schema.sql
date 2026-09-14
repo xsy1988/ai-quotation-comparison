@@ -72,11 +72,25 @@ CREATE TABLE IF NOT EXISTS dim_group (
     group_name    TEXT NOT NULL,
     parent_code   TEXT REFERENCES dim_group(group_code),
     member_atoms  TEXT NOT NULL DEFAULT '[]',  -- JSON 数组：原子编码列表
-    scope         TEXT NOT NULL,               -- process_domain / process_stage / process_class / custom
+    scope         TEXT NOT NULL,               -- drawer.code（对比抽屉，内置含 process_domain/process_stage/process_class）/ custom（不进对比抽屉）
     is_builtin    INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+
+-- 对比抽屉（比价页面「加工费专区」的页签来源；内置 3 个不可改删）
+CREATE TABLE IF NOT EXISTS drawer (
+    code        TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    is_builtin  INTEGER NOT NULL DEFAULT 0,
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+INSERT OR IGNORE INTO drawer (code, name, is_builtin, sort_order) VALUES
+    ('process_domain', '工艺域', 1, 10),
+    ('process_stage', '工艺阶段', 1, 20),
+    ('process_class', '工艺类别', 1, 30);
 
 CREATE TABLE IF NOT EXISTS supplier (
     code        TEXT PRIMARY KEY,
@@ -116,6 +130,7 @@ CREATE TABLE IF NOT EXISTS quote (
     sga_tax_total            REAL,
     other_total              REAL,
     tooling_total            REAL,
+    other_info               TEXT,            -- 其它信息（Markdown）：解析中识别到但不属于任何结构化字段的内容，供 AI 分析补充
     raw_json_path            TEXT,
     file_hash                TEXT,            -- 查重门禁用
     flags                    TEXT,            -- JSON 数组：校验徽标（calc_abnormal/cross_validation_conflict/low_confidence/unmatched/new_process/category_doubt）
@@ -200,7 +215,7 @@ CREATE TABLE IF NOT EXISTS parse_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     quote_id    INTEGER REFERENCES quote(id),
     task_id     INTEGER REFERENCES comparison_task(id),
-    stage       TEXT NOT NULL,               -- dedup/ingest/layout/match/validate/persist/ai_summary
+    stage       TEXT NOT NULL,               -- dedup/ingest/layout/match/validate/persist/ai_analysis
     action      TEXT NOT NULL,
     detail      TEXT,                        -- JSON：输入输出摘要、token、耗时等
     is_llm_call INTEGER NOT NULL DEFAULT 0,
@@ -208,20 +223,28 @@ CREATE TABLE IF NOT EXISTS parse_log (
 );
 CREATE INDEX IF NOT EXISTS idx_parse_log_quote ON parse_log(quote_id);
 
--- AI 综合建议（LLM 生成 + 数字回检）
-CREATE TABLE IF NOT EXISTS ai_summary (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id      INTEGER NOT NULL REFERENCES comparison_task(id),
-    content      TEXT NOT NULL,                -- AI 建议 markdown 文本
-    check_status TEXT NOT NULL DEFAULT 'unchecked'
-                 CHECK (check_status IN ('pass', 'mismatch')),
-    check_detail TEXT,                         -- JSON：数字回检明细
-    model        TEXT,
-    tokens       INTEGER,
-    elapsed_ms   INTEGER,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+-- AI 分析（LLM 生成结构化对比表格 + 数字回检）；按输入指纹版本化，同指纹复用
+CREATE TABLE IF NOT EXISTS ai_analysis (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         INTEGER NOT NULL REFERENCES comparison_task(id),
+    input_signature TEXT NOT NULL,             -- 结构化输入 + prompt 版本的 sha256
+    status          TEXT NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'completed', 'failed')),
+    content         TEXT,                      -- JSON：AI 分析表格结构
+    check_status    TEXT NOT NULL DEFAULT 'unchecked'
+                    CHECK (check_status IN ('pass', 'mismatch', 'unchecked')),
+    check_detail    TEXT,                      -- JSON：数字回检明细
+    error           TEXT,                      -- failed 时的错误摘要
+    model           TEXT,
+    tokens          INTEGER,
+    elapsed_ms      INTEGER,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
-CREATE INDEX IF NOT EXISTS idx_ai_summary_task ON ai_summary(task_id);
+CREATE INDEX IF NOT EXISTS idx_ai_analysis_task ON ai_analysis(task_id, id DESC);
+
+-- 旧版「AI 建议」模块已由「AI 分析」替代
+DROP TABLE IF EXISTS ai_summary;
 
 -- 源文件登记与查重（ingest 前置门禁）
 CREATE TABLE IF NOT EXISTS source_file (

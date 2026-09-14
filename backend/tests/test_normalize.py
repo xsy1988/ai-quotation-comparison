@@ -30,6 +30,17 @@ def test_non_amount_text_returns_none():
     assert normalize_amount("") is None
 
 
+def test_separator_only_text_returns_none():
+    """版面提取噪声：只剩千分位分隔符/单位，清洗后为空，必须返回 None 而不是抛 ValueError。"""
+    for noise in ("，", ",", "，，", "元", "￥", "¥", "／"):
+        assert normalize_amount(noise) is None, noise
+
+
+def test_amount_with_leading_separators():
+    assert normalize_amount("，123") == 123.0
+    assert normalize_amount(",1,234") == 1234.0
+
+
 def test_numeric_passthrough():
     assert normalize_amount(12) == 12.0
     assert normalize_amount(0.8) == 0.8

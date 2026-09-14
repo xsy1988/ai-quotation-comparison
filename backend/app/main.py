@@ -4,7 +4,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import corrections_router, master_router, suggestions_router, tasks_router
+from .api import (
+    corrections_router,
+    master_router,
+    quotes_router,
+    suggestions_router,
+    tasks_router,
+)
 from .config import settings
 from .db import init_db
 
@@ -29,6 +35,7 @@ app.include_router(tasks_router)
 app.include_router(corrections_router)
 app.include_router(suggestions_router)
 app.include_router(master_router)
+app.include_router(quotes_router)
 
 
 @app.get("/health")

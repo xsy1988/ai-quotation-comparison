@@ -1,8 +1,8 @@
 import axios from 'axios'
 import type { AxiosError } from 'axios'
 import type {
-  AiSummary,
-  AiSummaryResponse,
+  AiAnalysis,
+  AiAnalysisResponse,
   AtomOption,
   CategoryOption,
   Comparison,
@@ -14,9 +14,12 @@ import type {
   MasterAtomCreatePayload,
   MasterCategory,
   MasterDimGroup,
+  MasterDrawer,
   MasterSupplier,
   NewAtomSuggestion,
   ProgressPayload,
+  QuoteDetail,
+  QuoteListItem,
   QuoteLinePatch,
   QuoteLinePatchResult,
   QuotePatch,
@@ -43,14 +46,18 @@ export async function getComparison(taskId: number): Promise<Comparison> {
   return data
 }
 
-export async function getAiSummary(taskId: number): Promise<AiSummaryResponse> {
-  const { data } = await http.get<AiSummaryResponse>(`/api/tasks/${taskId}/ai-summary`)
+/**
+ * 查询当前输入指纹下的 AI 分析结果。
+ * auto_run=true 表示该数据版本尚无分析记录（前端进入页面时自动触发一次，刷新不重复触发）。
+ */
+export async function getAiAnalysis(taskId: number): Promise<AiAnalysisResponse> {
+  const { data } = await http.get<AiAnalysisResponse>(`/api/tasks/${taskId}/ai-analysis`)
   return data
 }
 
-export async function generateAiSummary(taskId: number): Promise<AiSummary> {
+export async function generateAiAnalysis(taskId: number): Promise<AiAnalysis> {
   // LLM 生成含数字回检与一轮重生成，真实耗时 20~60s，放宽该请求超时
-  const { data } = await http.post<AiSummary>(`/api/tasks/${taskId}/ai-summary`, null, {
+  const { data } = await http.post<AiAnalysis>(`/api/tasks/${taskId}/ai-analysis`, null, {
     timeout: 180000,
   })
   return data
@@ -58,6 +65,22 @@ export async function generateAiSummary(taskId: number): Promise<AiSummary> {
 
 export async function getTasks(): Promise<TaskListItem[]> {
   const { data } = await http.get<TaskListItem[]>('/api/tasks')
+  return data
+}
+
+// ---------- 报价单数据 ----------
+
+export async function listQuotes(params: {
+  q?: string
+  parse_status?: string
+  task_id?: number
+} = {}): Promise<QuoteListItem[]> {
+  const { data } = await http.get<{ items: QuoteListItem[] }>('/api/quotes', { params })
+  return data.items
+}
+
+export async function getQuote(quoteId: number): Promise<QuoteDetail> {
+  const { data } = await http.get<QuoteDetail>(`/api/quotes/${quoteId}`)
   return data
 }
 
@@ -229,7 +252,12 @@ export async function createMasterDimGroup(payload: {
 
 export async function patchMasterDimGroup(
   groupCode: string,
-  patch: { group_name?: string; parent_code?: string | null; member_atoms?: string[] },
+  patch: {
+    group_name?: string
+    scope?: DimGroupScope
+    parent_code?: string | null
+    member_atoms?: string[]
+  },
 ): Promise<MasterDimGroup> {
   const { data } = await http.patch<MasterDimGroup>(
     `/api/master/dim_groups/${encodeURIComponent(groupCode)}`,
@@ -240,6 +268,37 @@ export async function patchMasterDimGroup(
 
 export async function deleteMasterDimGroup(groupCode: string): Promise<void> {
   await http.delete(`/api/master/dim_groups/${encodeURIComponent(groupCode)}`)
+}
+
+// ---------- 对比抽屉（基础数据维护 / 抽屉管理） ----------
+
+export async function listMasterDrawers(): Promise<MasterDrawer[]> {
+  const { data } = await http.get<{ drawers: MasterDrawer[] }>('/api/master/drawers')
+  return data.drawers
+}
+
+export async function createMasterDrawer(payload: {
+  code: string
+  name: string
+  sort_order?: number
+}): Promise<MasterDrawer> {
+  const { data } = await http.post<MasterDrawer>('/api/master/drawers', payload)
+  return data
+}
+
+export async function patchMasterDrawer(
+  code: string,
+  patch: { name?: string; sort_order?: number },
+): Promise<MasterDrawer> {
+  const { data } = await http.patch<MasterDrawer>(
+    `/api/master/drawers/${encodeURIComponent(code)}`,
+    patch,
+  )
+  return data
+}
+
+export async function deleteMasterDrawer(code: string): Promise<void> {
+  await http.delete(`/api/master/drawers/${encodeURIComponent(code)}`)
 }
 
 export async function listMasterSuppliers(q: string): Promise<MasterSupplier[]> {

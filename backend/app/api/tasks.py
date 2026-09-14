@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app.compare.ai_summary import generate_ai_summary, get_ai_summary
+from app.compare.ai_analysis import get_ai_analysis, run_ai_analysis
 from app.compare.compare_engine import get_comparison
 from app.db import get_connection, init_db
 from app.llm.client import LLMError
@@ -157,30 +157,32 @@ def task_comparison(task_id: int) -> dict:
         conn.close()
 
 
-@router.post("/{task_id}/ai-summary")
-def generate_task_ai_summary(task_id: int) -> dict:
+@router.get("/{task_id}/ai-analysis")
+def task_ai_analysis(task_id: int) -> dict:
+    """查询态：返回当前输入指纹下的分析结果 + 是否需要自动触发。"""
+    init_db()
+    conn = get_connection()
+    try:
+        _task_or_404(conn, task_id)
+        return get_ai_analysis(conn, task_id)
+    finally:
+        conn.close()
+
+
+@router.post("/{task_id}/ai-analysis")
+def generate_task_ai_analysis(task_id: int) -> dict:
+    """生成态：手动触发/自动触发都走这里；同指纹已完成则直接复用。"""
     init_db()
     conn = get_connection()
     try:
         _task_or_404(conn, task_id)
         try:
-            return generate_ai_summary(conn, task_id)
+            return run_ai_analysis(conn, task_id)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
         except LLMError as e:
             # LLM 故障不降级：502 透出原始错误信息，前端 Alert 展示
             raise HTTPException(status_code=502, detail=str(e))
-    finally:
-        conn.close()
-
-
-@router.get("/{task_id}/ai-summary")
-def task_ai_summary(task_id: int) -> dict:
-    init_db()
-    conn = get_connection()
-    try:
-        _task_or_404(conn, task_id)
-        return {"summary": get_ai_summary(conn, task_id)}
     finally:
         conn.close()
 

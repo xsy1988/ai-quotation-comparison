@@ -21,7 +21,8 @@ DATE_FORMATS = (
 )
 
 _AMOUNT_NOISE_RE = re.compile(r"[\s,，￥¥$€元/／]")
-_PURE_AMOUNT_RE = re.compile(r"^\(?-?[\d,，]+(\.\d+)?\)?\s*(元|人民币|块)?$")
+# 至少含一位数字：单独的千分位分隔符（"，"、","）是版面提取噪声，不能被当成金额
+_PURE_AMOUNT_RE = re.compile(r"^\(?-?[\d,，]*\d[\d,，]*(\.\d+)?\)?\s*(元|人民币|块)?$")
 _NUMBER_RE = re.compile(r"-?\d[\d,]*\.?\d*")
 _FRACTION_RE = re.compile(r"^\d+\s*/\s*\d+$")
 _RANGE_RE = re.compile(r"^\d+(\.\d+)?\s*[-~～—]\s*\d+(\.\d+)?$")
@@ -42,6 +43,8 @@ def normalize_amount(value: Any) -> float | None:
     negative = (text.startswith("(") and text.endswith(")")) or text.startswith("-")
     if _PURE_AMOUNT_RE.match(text):
         cleaned = _AMOUNT_NOISE_RE.sub("", text).strip("()+-")
+        if not cleaned:  # 纯噪声（如 "，"/"元"）清洗后为空，不是金额
+            return None
         amount = float(cleaned)
         return -amount if negative else amount
     match = _NUMBER_RE.search(text)

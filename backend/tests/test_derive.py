@@ -26,6 +26,7 @@ from app.derive import (
     derive_offer,
 )
 from app.normalize import amount_in_text
+from app.persist import collect_flags
 
 FIXTURE = Path(__file__).parent / "fixtures" / "envelope_chuangfeng_two_offers.json"
 IR_FIXTURE = Path(__file__).parent / "fixtures" / "ir_chuangfeng.json"
@@ -424,3 +425,85 @@ def test_derive_envelope_returns_flags_per_offer():
     assert len(result["flags_per_offer"]) == 2
     assert all(SHARED_CELL_FLAG in flags for flags in result["flags_per_offer"])
     assert all(CONFLICT_FLAG in flags for flags in result["flags_per_offer"])
+
+
+# ---------------------------------------------------------------------------
+# 金额未印出（null）：合计只能算下限，不得静默当完整合计
+# ---------------------------------------------------------------------------
+
+def test_missing_amount_records_conflict_and_flag():
+    """材料费格未印出（null）→ 记 amount_missing 冲突，合计标注为下限，并打 calc_abnormal。"""
+    offer = _mini_offer(
+        processing_total=None,
+        processing_items=[
+            {"name": "CNC", "amount_per_pc": 1.5},
+            {"name": "阳极", "amount_per_pc": None, "note": "单据未印出金额"},
+        ],
+    )
+    flags = derive_offer(offer)
+    assert CONFLICT_FLAG in flags
+    assert "calc_abnormal" in collect_flags(offer, "ok")  # persist 侧据冲突补打标
+    conflicts = [c for c in offer["_derived"]["conflicts"] if c["kind"] == "amount_missing"]
+    assert len(conflicts) == 1
+    assert conflicts[0]["module"] == "processing"
+    assert conflicts[0]["derived_value"] == 1.5
+    assert "1 项明细金额单据未印出" in conflicts[0]["detail"]
+    assert offer["_derived"]["modules_with_missing_amounts"] == {"processing": 1}
+
+
+def test_missing_amount_conflict_replayed_idempotently():
+    """双跑（persist 路径不传 ir）冲突记录一致，不重复累积。"""
+    offer = _mini_offer(
+        processing_total=None,
+        processing_items=[{"name": "CNC", "amount_per_pc": None}],
+    )
+    derive_offer(offer)
+    first = [c for c in offer["_derived"]["conflicts"] if c["kind"] == "amount_missing"]
+    derive_offer(offer)
+    second = [c for c in offer["_derived"]["conflicts"] if c["kind"] == "amount_missing"]
+    assert first == second and len(second) == 1
+
+
+def test_tax_null_amount_is_not_flagged_as_missing():
+    """税费条目为 null 是契约要求（脚本按税率派生），不算「金额未印出」。"""
+    offer = _mini_offer(
+        sga_items=[
+            {"name": "增值税", "item_type": "税费", "amount_per_pc": None, "rate": 0.13},
+            {"name": "管理费", "item_type": "管理费", "amount_per_pc": 1.0},
+        ],
+    )
+    derive_offer(offer)
+    assert "sga_tax" not in offer["_derived"].get("modules_with_missing_amounts", {})
+    assert not [c for c in offer["_derived"]["conflicts"] if c["kind"] == "amount_missing"]
+
+
+def test_module_total_all_null_items_stays_null():
+    """材料费明细金额全部未印出（null）→ 模块 total 保持 null（不以 0 占位），
+    只记 amount_missing 冲突并标明「无可信合计」。"""
+    offer = _mini_offer(processing_total=None)
+    offer["unit_price"]["materials"] = {
+        "total": None,
+        "items": [{"name": "材料费", "amount_per_pc": None, "note": "料重 28；料价 0.96"}],
+    }
+    derive_offer(offer)
+    assert offer["unit_price"]["materials"]["total"] is None
+    assert "materials" not in offer["_derived"].get("filled_module_totals", [])
+    assert offer["_derived"]["modules_with_missing_amounts"] == {"materials": 1}
+    conflict = next(c for c in offer["_derived"]["conflicts"] if c["kind"] == "amount_missing")
+    assert conflict["module"] == "materials"
+    assert conflict["derived_value"] is None
+    assert "无可信合计" in conflict["detail"]
+
+
+def test_module_total_partial_null_items_filled_with_lower_bound():
+    """部分明细金额未印出 → 仍按已知项之和回填下限（与全 null 区分）。"""
+    offer = _mini_offer(
+        processing_total=None,
+        processing_items=[
+            {"name": "CNC", "amount_per_pc": 1.5},
+            {"name": "阳极", "amount_per_pc": None},
+        ],
+    )
+    derive_offer(offer)
+    assert offer["unit_price"]["processing"]["total"] == 1.5
+    assert "processing" in offer["_derived"]["filled_module_totals"]

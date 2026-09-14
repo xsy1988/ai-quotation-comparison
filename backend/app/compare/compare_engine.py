@@ -21,7 +21,6 @@ HIERARCHY_ROWS: list[tuple[str, str, str]] = [
     ("final_unit_price_taxed", "最终含税单价", "summary"),
 ]
 
-DRAWER_SCOPES = ("process_domain", "process_stage", "process_class")
 UNMATCHED_BUCKET_CODE = "unmatched"
 
 
@@ -36,7 +35,7 @@ def _task_quotes(conn: sqlite3.Connection, task_id: int) -> list[sqlite3.Row]:
     return list(
         conn.execute(
             "SELECT id, supplier_name, supplier_code, flags, calc_check, final_unit_price_taxed,"
-            " category_code, basic_info"
+            " category_code, basic_info, other_info"
             " FROM quote WHERE task_id = ? AND parse_status IN ('parsed', 'reviewed') ORDER BY id",
             (task_id,),
         )
@@ -58,6 +57,7 @@ def _suppliers(quotes: list[sqlite3.Row]) -> list[dict]:
                 "calc_check": row["calc_check"],
                 "final_unit_price_taxed": row["final_unit_price_taxed"],
                 "category_code": row["category_code"],
+                "other_info": row["other_info"],
             }
         )
     return suppliers
@@ -151,20 +151,25 @@ def _drawer_bucket(conn: sqlite3.Connection, quote_ids: list[int], members: list
 
 
 def _drawers(conn: sqlite3.Connection, quote_ids: list[int]) -> list[dict]:
+    drawers = list(conn.execute("SELECT code, name FROM drawer ORDER BY sort_order, code"))
+    if not drawers:
+        return []
+    codes = [d["code"] for d in drawers]
     groups = list(
         conn.execute(
-            "SELECT group_code, group_name, scope, member_atoms FROM dim_group"
-            " WHERE is_builtin = 1 AND scope IN (?, ?, ?)"
-            " ORDER BY scope, group_code",
-            DRAWER_SCOPES,
+            f"SELECT group_code, group_name, scope, member_atoms FROM dim_group"
+            f" WHERE scope IN ({','.join('?' for _ in codes)}) ORDER BY scope, group_code",
+            codes,
         )
     )
-    by_scope: dict[str, list[sqlite3.Row]] = {scope: [] for scope in DRAWER_SCOPES}
+    by_scope: dict[str, list[sqlite3.Row]] = {code: [] for code in codes}
     for row in groups:
-        by_scope[row["scope"]].append(row)
+        if row["scope"] in by_scope:
+            by_scope[row["scope"]].append(row)
 
     result: list[dict] = []
-    for scope in DRAWER_SCOPES:
+    for drawer in drawers:
+        scope = drawer["code"]
         scope_groups: list[dict] = []
         for row in by_scope[scope]:
             # 空成员组不下发（避免与未匹配桶重复计数）
@@ -187,7 +192,7 @@ def _drawers(conn: sqlite3.Connection, quote_ids: list[int]) -> list[dict]:
                 "is_fallback_bucket": True,
             }
         )
-        result.append({"scope": scope, "groups": scope_groups})
+        result.append({"scope": scope, "name": drawer["name"], "groups": scope_groups})
     return result
 
 

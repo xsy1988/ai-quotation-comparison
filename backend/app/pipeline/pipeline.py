@@ -311,6 +311,11 @@ def _process_one(task_id: int, project_name: str, upload: dict) -> dict:
             return {"quote_id": quote_id, "status": "failed", "error": str(e)}
         except (ParseError, IngestParseError, ValidateError, ValueError, KeyError, json.JSONDecodeError) as e:
             quote_id = _mark_failed(conn, task_id, upload["original_name"], "parse", e, placeholder_id)
+            # 栈也入档：这类错误此前只留一行 str(e)，事后无法定位（如 "could not convert string to float: ''"）
+            _log(
+                conn, task_id, "parse", f"{type(e).__name__}", {"traceback": traceback.format_exc()},
+                quote_id,
+            )
             return {"quote_id": quote_id, "status": "failed", "error": str(e)}
         except Exception as e:  # 兜底：单文件异常不拖垮整任务
             quote_id = _mark_failed(conn, task_id, upload["original_name"], "parse", e, placeholder_id)

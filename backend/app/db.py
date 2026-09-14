@@ -30,6 +30,7 @@ COLUMN_MIGRATIONS: dict[str, list[str]] = {
     "quote": [
         "ALTER TABLE quote ADD COLUMN supplier_name TEXT",
         "ALTER TABLE quote ADD COLUMN flags TEXT",
+        "ALTER TABLE quote ADD COLUMN other_info TEXT",
     ],
     "quote_line": [
         "ALTER TABLE quote_line ADD COLUMN cross_check TEXT",

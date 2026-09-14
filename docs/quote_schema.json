@@ -53,7 +53,7 @@
                 "required": ["name", "amount_per_pc"],
                 "properties": {
                   "name":          { "type": "string" },
-                  "amount_per_pc": { "type": "number", "description": "元/pcs" },
+                  "amount_per_pc": { "type": ["number", "null"], "description": "元/pcs；单据未印出该项金额（例如只给了料重×料价等要素）时为 null，并把要素原文写入 note，禁止自行相乘相加" },
                   "spec":          { "type": ["string", "null"], "description": "材质/规格（原文）" },
                   "note":          { "type": ["string", "null"], "description": "说明，自由文本（重量×单价−水口回收等计算过程原样保留）" },
                   "evidence":      { "$ref": "#/definitions/evidence" }
@@ -76,7 +76,7 @@
                 "required": ["name", "amount_per_pc", "confidence", "confirm_status"],
                 "properties": {
                   "name":               { "type": "string", "description": "供应商原文名称" },
-                  "amount_per_pc":      { "type": "number", "description": "元/pcs" },
+                  "amount_per_pc":      { "type": ["number", "null"], "description": "元/pcs；单据未印出金额（如工序栏为空或写「/」）时为 null，禁止用其它列的数据推算" },
                   "atom_code":          { "type": ["string", "null"], "description": "命中的原子编码；工艺不在清单中（is_new_process=true）或完全无法判断时为 null" },
                   "is_new_process":     { "type": "boolean", "default": false, "description": "LLM 判定为清单外的新工艺时置 true，触发新工艺上报流程（前端询问是否新增原子）" },
                   "bundle_flag":        { "type": "boolean", "default": false },
@@ -117,7 +117,7 @@
                 "required": ["name", "amount_per_pc", "item_type"],
                 "properties": {
                   "name":          { "type": "string" },
-                  "amount_per_pc": { "type": "number" },
+                  "amount_per_pc": { "type": ["number", "null"], "description": "元/pcs；单据未印出金额时为 null，禁止推算" },
                   "item_type":     { "type": "string", "enum": ["包装", "运输"] },
                   "note":          { "type": ["string", "null"] },
                   "evidence":      { "$ref": "#/definitions/evidence" }
@@ -140,7 +140,7 @@
                 "required": ["name", "amount_per_pc", "item_type"],
                 "properties": {
                   "name":          { "type": "string" },
-                  "amount_per_pc": { "type": "number", "description": "元/pcs" },
+                  "amount_per_pc": { "type": ["number", "null"], "description": "元/pcs；税费条目只印出税率时填 null（由调度层按 税率×未税 派生），禁止自己算或填 0 占位" },
                   "item_type":     { "type": "string", "enum": ["损耗", "管理费", "利润", "税费", "其他"] },
                   "rate":          { "type": ["number", "null"], "description": "费率原文（0.13 = 13%）；税费条目必填" },
                   "note":          { "type": ["string", "null"] },
@@ -164,7 +164,7 @@
                 "required": ["name", "amount_per_pc", "note"],
                 "properties": {
                   "name":          { "type": "string" },
-                  "amount_per_pc": { "type": "number" },
+                  "amount_per_pc": { "type": ["number", "null"], "description": "元/pcs；未印出金额时为 null，禁止推算" },
                   "note":          { "type": "string", "description": "说明（必填）：该费用是什么、为何无法归类" },
                   "evidence":      { "$ref": "#/definitions/evidence" }
                 }
@@ -206,7 +206,7 @@
                 "required": ["name", "amount"],
                 "properties": {
                   "name":     { "type": "string" },
-                  "amount":   { "type": "number", "description": "元，一次性" },
+                  "amount":   { "type": ["number", "null"], "description": "元，一次性；单据未印出金额时为 null，禁止推算" },
                   "cavities": { "type": ["integer", "null"], "description": "穴数" },
                   "lifespan": { "type": ["number", "null"], "description": "寿命（模次）" },
                   "note":     { "type": ["string", "null"] },
@@ -228,7 +228,7 @@
                 "required": ["name", "amount"],
                 "properties": {
                   "name":   { "type": "string" },
-                  "amount": { "type": "number" },
+                  "amount": { "type": ["number", "null"], "description": "元，一次性；单据未印出金额时为 null，禁止推算" },
                   "note":   { "type": ["string", "null"] },
                   "evidence": { "$ref": "#/definitions/evidence" }
                 }
@@ -248,7 +248,7 @@
                 "required": ["name", "amount"],
                 "properties": {
                   "name":   { "type": "string" },
-                  "amount": { "type": "number" },
+                  "amount": { "type": ["number", "null"], "description": "元，一次性；单据未印出金额时为 null，禁止推算" },
                   "note":   { "type": ["string", "null"] },
                   "evidence": { "$ref": "#/definitions/evidence" }
                 }
@@ -257,6 +257,11 @@
           }
         }
       }
+    },
+
+    "other_info": {
+      "type": ["string", "null"],
+      "description": "「其它信息」：解析时识别到、但不属于任何结构化字段的内容，Markdown 文本（可用小标题/列表/表格组织）。作为 AI 分析的补充信息源；没有额外信息时为 null。手机号、姓名、邮箱、印章等个人身份与签章信息，以及银行账号、开户行、开户资料等收款与开户信息，严禁写入。"
     }
   },
 
@@ -275,7 +280,7 @@
       "required": ["name", "amount_per_pc"],
       "properties": {
         "name":          { "type": "string" },
-        "amount_per_pc": { "type": "number" },
+        "amount_per_pc": { "type": ["number", "null"], "description": "元/pcs；单据未印出金额时为 null，禁止推算" },
         "note":          { "type": ["string", "null"] },
         "evidence":      { "$ref": "#/definitions/evidence" }
       }
