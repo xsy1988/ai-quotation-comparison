@@ -95,10 +95,33 @@ export async function getSnapshot(
 
 // ---------- 就地编辑（第 7 步） ----------
 
-/** 后端错误 detail（400/404/502 的 {"detail": "..."}），取不到则回退 error.message */
-export function errorDetail(e: unknown): string {
+/** HTTP 状态码，非 HTTP 错误（网络中断、超时）返回 undefined */
+export function httpStatus(e: unknown): number | undefined {
+  const status = (e as AxiosError)?.response?.status
+  return typeof status === 'number' ? status : undefined
+}
+
+/** 4xx 属客户端错误，重试不会成功（react-query retry 判定用） */
+export function isClientError(e: unknown): boolean {
+  const status = httpStatus(e)
+  return status !== undefined && status >= 400 && status < 500
+}
+
+/** 后端错误 detail（400/404/502 的 {"detail": "..."}），取不到则按状态码给中文提示 */
+export function errorDetail(e: unknown, fallback = '请求失败'): string {
+  if (e === null || e === undefined) return fallback
   const resp = (e as AxiosError<{ detail?: string }>).response
-  return resp?.data?.detail ?? (e instanceof Error ? e.message : String(e))
+  const detail = resp?.data?.detail
+  if (typeof detail === 'string' && detail) return detail
+  const status = resp?.status
+  if (status === 404) return '记录不存在或已被删除'
+  if (status !== undefined && status >= 500) return `服务端错误（${status}），请查看后端日志`
+  if (status === undefined) {
+    const code = (e as AxiosError).code
+    if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') return '请求超时，请稍后重试'
+    if (code === 'ERR_NETWORK') return '无法连接服务器，请确认后端服务已启动'
+  }
+  return e instanceof Error && e.message ? e.message : fallback
 }
 
 export async function patchQuote(quoteId: number, patch: QuotePatch): Promise<QuotePatchResult> {

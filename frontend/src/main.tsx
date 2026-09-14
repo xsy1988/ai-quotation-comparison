@@ -7,6 +7,7 @@ import { createRoot } from 'react-dom/client'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
 import './index.css'
+import { isClientError } from './api/client'
 import App from './App'
 import CreatePage from './pages/CreatePage'
 import ProgressPage from './pages/ProgressPage'
@@ -21,7 +22,8 @@ dayjs.locale('zh-cn')
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 1,
+      // 4xx 重试无意义（且重试被暂停时会卡在假加载态），只对网络/5xx 失败重试一次
+      retry: (failureCount, error) => (isClientError(error) ? false : failureCount < 1),
       refetchOnWindowFocus: false,
     },
   },

@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
-import { Alert, Badge, Card, Empty, Space, Spin, Table, Tag, Typography } from 'antd'
+import { Alert, Badge, Button, Card, Empty, Space, Spin, Table, Tag, Typography } from 'antd'
 import { useQuery } from '@tanstack/react-query'
-import { useParams } from 'react-router-dom'
-import { getComparison } from '../api/client'
+import { useNavigate, useParams } from 'react-router-dom'
+import { errorDetail, getComparison, httpStatus } from '../api/client'
 import type { Comparison, Supplier, WarningCategory } from '../types'
 import HierarchyTable from '../components/HierarchyTable'
 import DrawerTabs from '../components/DrawerTabs'
@@ -55,9 +55,10 @@ const BADGE_DEFS: {
 export default function ComparisonPage() {
   const { id } = useParams<{ id: string }>()
   const taskId = Number(id)
+  const navigate = useNavigate()
   const [activeBadge, setActiveBadge] = useState<WarningCategory | null>(null)
 
-  const { data, isLoading, isError, error } = useQuery({
+  const { data, isError, error, isPending } = useQuery({
     queryKey: ['comparison', taskId],
     queryFn: () => getComparison(taskId),
     enabled: Number.isFinite(taskId),
@@ -76,22 +77,29 @@ export default function ComparisonPage() {
   if (!Number.isFinite(taskId)) {
     return <Alert type="error" message="无效的任务 ID" showIcon />
   }
-  if (isLoading) {
+  if (isError) {
+    const notFound = httpStatus(error) === 404
+    return (
+      <Alert
+        type="error"
+        message={notFound ? '对比任务不存在或已被删除' : '加载对比结果失败'}
+        description={errorDetail(error)}
+        showIcon
+        action={
+          <Button size="small" onClick={() => navigate('/tasks')}>
+            返回报价对比历史
+          </Button>
+        }
+      />
+    )
+  }
+  // 含「等待重试/暂停」等无数据也无错误的中间态：一律显示加载中，避免渲染出 null
+  if (isPending || !data) {
     return (
       <div style={{ textAlign: 'center', padding: 80 }}>
         <Spin size="large" />
         <div style={{ marginTop: 16 }}>加载对比结果…</div>
       </div>
-    )
-  }
-  if (isError || !data) {
-    return (
-      <Alert
-        type="error"
-        message="加载对比结果失败"
-        description={error instanceof Error ? error.message : String(error)}
-        showIcon
-      />
     )
   }
 

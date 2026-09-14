@@ -15,8 +15,8 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
-import { Link, useParams } from 'react-router-dom'
-import { getQuote } from '../api/client'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { errorDetail, getQuote, httpStatus } from '../api/client'
 import type { QuoteLine, QuoteToolingLine } from '../types'
 import Amount from '../components/Amount'
 import { CollapsibleText } from '../components/MarkdownLite'
@@ -66,6 +66,7 @@ function basicEntries(basic: Record<string, unknown>) {
 export default function QuoteDetailPage() {
   const { id } = useParams<{ id: string }>()
   const quoteId = Number(id)
+  const navigate = useNavigate()
   const [activeModule, setActiveModule] = useState('all')
 
   const { data, isLoading, isError, error } = useQuery({
@@ -90,12 +91,18 @@ export default function QuoteDetailPage() {
   }, [data, activeModule])
 
   if (isError) {
+    const notFound = httpStatus(error) === 404
     return (
       <Alert
         type="error"
-        message="加载报价单解析结果失败"
-        description={error instanceof Error ? error.message : String(error)}
+        message={notFound ? '报价单不存在或已被删除' : '加载报价单解析结果失败'}
+        description={errorDetail(error)}
         showIcon
+        action={
+          <Button size="small" onClick={() => navigate('/quotes')}>
+            返回报价单数据
+          </Button>
+        }
       />
     )
   }
